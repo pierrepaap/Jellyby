@@ -25,9 +25,14 @@
 #include <linux/input-event-codes.h>
 #include <linux/uinput.h>
 
+/* header layout differs by distro: Debian/Raspberry Pi OS uses
+ * /usr/include/cec/, Ubuntu uses /usr/include/libcec/, and pkg-config may
+ * point directly at the header dir */
 #if defined(__has_include)
 #  if __has_include(<cec/cecc.h>)
 #    include <cec/cecc.h>
+#  elif __has_include(<libcec/cecc.h>)
+#    include <libcec/cecc.h>
 #  elif __has_include(<cecc.h>)
 #    include <cecc.h>
 #  else
