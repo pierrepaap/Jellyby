@@ -29,17 +29,25 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user-static binfmt-support parted e2fsprogs xz-utils curl openssl
+          sudo apt-get install -y qemu-user-static binfmt-support parted e2fsprogs xz-utils curl openssl cloud-guest-utils
 
       - name: Download Raspberry Pi OS Lite (64-bit, latest)
         run: |
           curl -fL -o base.img.xz https://downloads.raspberrypi.com/raspios_lite_arm64_latest
           xz -d -k base.img.xz
 
-      - name: Mount image partitions
+      - name: Grow image by 8G for the in-image apt install (pishrink shrinks it back at the end)
         run: |
+          truncate -s +8G base.img
           LOOP=$(sudo losetup -fP --show base.img)
           echo "LOOP=$LOOP" >> "$GITHUB_ENV"
+          sudo growpart "$LOOP" 2
+          sudo partprobe "$LOOP"
+          sudo e2fsck -fy "${LOOP}p2"
+          sudo resize2fs "${LOOP}p2"
+
+      - name: Mount image partitions
+        run: |
           sudo mkdir -p /mnt/jb-boot /mnt/jb-root
           sudo mount "${LOOP}p1" /mnt/jb-boot
           sudo mount "${LOOP}p2" /mnt/jb-root
