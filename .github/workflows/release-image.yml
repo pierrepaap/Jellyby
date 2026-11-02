@@ -4,14 +4,24 @@ name: release-image
 # chroot under qemu-user-static), shrinks it, and publishes it as a GitHub
 # Release asset together with a Raspberry Pi Imager custom-repo JSON.
 #
-# Run manually (Actions -> release-image -> Run workflow) or by pushing a tag:
-#   git tag image-1 && git push origin image-1
+# Build triggers:
+#   - a PR merged to main, once the lint workflow on that commit is green
+#     (push to main -> lint -> workflow_run, gated on lint success)
+#   - a release published (on: release, published)
+#   - manually: Actions -> release-image -> Run workflow
+#   - or by pushing a tag: git tag image-1 && git push origin image-1
 
 on:
   workflow_dispatch:
   push:
     tags:
       - "image-*"
+  release:
+    types: [published]
+  workflow_run:
+    workflows: [lint]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: write
@@ -24,8 +34,9 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install build tools
         run: |
@@ -60,7 +71,8 @@ jobs:
           sudo mount --bind /dev /mnt/jb-root/dev
           sudo mount --bind /proc /mnt/jb-root/proc
           sudo mount --bind /sys /mnt/jb-root/sys
-          sudo cp -a . /mnt/jb-root/root/Jellyby
+          sudo mkdir -p /mnt/jb-root/root/Jellyby
+          git archive HEAD | sudo tar -x -C /mnt/jb-root/root/Jellyby
           sudo chroot /mnt/jb-root /usr/bin/qemu-aarch64-static /bin/bash -c \
             "cd /root/Jellyby && JELLYBY_OFFLINE=1 ./setup.sh"
           sudo rm -rf /mnt/jb-root/root/Jellyby /mnt/jb-root/usr/bin/qemu-aarch64-static
@@ -112,9 +124,9 @@ jobs:
           PY
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('image-run-{0}', github.run_number) }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || (github.event_name == 'release' && github.event.release.tag_name) || format('image-run-{0}', github.run_number) }}
           name: Jellyby Pi 4 image (run ${{ github.run_number }})
           make_latest: true
           fail_on_unmatched_files: true

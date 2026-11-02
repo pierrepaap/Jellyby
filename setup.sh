@@ -95,10 +95,10 @@ if [[ "${JELLYBY_OFFLINE:-0}" != "1" ]]; then
 fi
 
 echo "==> Enabling services"
-systemctl daemon-reload
 if [[ "${JELLYBY_OFFLINE:-0}" == "1" ]]; then
   systemctl enable ssh jellyby-web cec-kbd jellyby-x jellyby-kiosk readsb
 else
+  systemctl daemon-reload
   systemctl enable --now ssh
   systemctl enable --now jellyby-web cec-kbd jellyby-x jellyby-kiosk readsb
 fi
