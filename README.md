@@ -160,14 +160,14 @@ Plug the RTL-SDR dongle into the Pi before (re)starting the service.
 downloads the latest Pi OS Lite (64-bit), mounts the image, enables SSH +
 default user on the boot partition, runs `setup.sh` in a chroot under
 `qemu-user-static` (`JELLYBY_OFFLINE=1` mode), shrinks the image with PiShrink
-(auto-expands on first boot), and publishes `jellyby-pi4.img.xz` plus a
-ready-made `jellyby-imager.json` to a GitHub Release marked "latest".
+(auto-expands on first boot), and attaches `jellyby-pi4.img.xz` plus a
+ready-made `jellyby-imager.json` (with sha256/size) to the release.
 
-Trigger it manually (Actions → release-image → Run workflow) or with a tag:
-
-```bash
-git tag image-1 && git push origin image-1
-```
+**Single trigger: publish a GitHub release** (Releases → New release → choose
+a tag like `v0.2.0` → mark as latest → Publish). The workflow then builds the
+image and uploads the assets to that release. Lint still gates every PR/merge
+via `lint.yml`; image builds stay release-driven so each image maps to a
+versioned release.
 
 ## Security notes
 

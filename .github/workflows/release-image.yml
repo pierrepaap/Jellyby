@@ -1,27 +1,16 @@
 name: release-image
 
 # Builds a ready-to-flash Jellyby image (Pi OS Lite 64-bit + setup.sh run in a
-# chroot under qemu-user-static), shrinks it, and publishes it as a GitHub
-# Release asset together with a Raspberry Pi Imager custom-repo JSON.
+# chroot under qemu-user-static), shrinks it, and attaches the image plus a
+# Raspberry Pi Imager custom-repo JSON to the published GitHub Release.
 #
-# Build triggers:
-#   - a PR merged to main, once the lint workflow on that commit is green
-#     (push to main -> lint -> workflow_run, gated on lint success)
-#   - a release published (on: release, published)
-#   - manually: Actions -> release-image -> Run workflow
-#   - or by pushing a tag: git tag image-1 && git push origin image-1
+# Single trigger: publishing a release (Releases -> New release -> Publish).
+# The lint workflow still runs on every PR/push and gates merges; image builds
+# are deliberately release-driven so each image maps to a versioned release.
 
 on:
-  workflow_dispatch:
-  push:
-    tags:
-      - "image-*"
   release:
     types: [published]
-  workflow_run:
-    workflows: [lint]
-    types: [completed]
-    branches: [main]
 
 permissions:
   contents: write
@@ -34,7 +23,6 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v6
 
@@ -126,7 +114,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || (github.event_name == 'release' && github.event.release.tag_name) || format('image-run-{0}', github.run_number) }}
+          tag_name: ${{ github.event.release.tag_name }}
           name: Jellyby Pi 4 image (run ${{ github.run_number }})
           make_latest: true
           fail_on_unmatched_files: true
