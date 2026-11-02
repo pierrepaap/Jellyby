@@ -1,0 +1,12 @@
+[Unit]
+Description=Jellyby CEC remote to keyboard daemon
+After=jellyby-x.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cec-kbd /etc/jellyby/cec-keymap.conf
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

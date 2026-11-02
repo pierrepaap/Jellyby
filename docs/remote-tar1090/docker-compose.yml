@@ -1,0 +1,20 @@
+# tar1090 on the REMOTE machine (not on the Pi).
+# The Pi only runs readsb and serves Beast output on TCP port 30005.
+#
+# Point BEASTHOST at the IP of the Jellyby Pi. Then open http://<remote-host>:8080
+#
+# docker compose up -d
+services:
+  tar1090:
+    image: ghcr.io/wiedehopf/tar1090:latest
+    container_name: tar1090
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    environment:
+      # IP of the Jellyby Pi running readsb (beast out on port 30005)
+      - BEASTHOST=192.168.1.20
+      # - LATITUDE=50.0000
+      # - LONGITUDE=8.0000
+    tmpfs:
+      - /run:exec,size=64M

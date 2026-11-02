@@ -1,0 +1,123 @@
+name: release-image
+
+# Builds a ready-to-flash Jellyby image (Pi OS Lite 64-bit + setup.sh run in a
+# chroot under qemu-user-static), shrinks it, and publishes it as a GitHub
+# Release asset together with a Raspberry Pi Imager custom-repo JSON.
+#
+# Run manually (Actions -> release-image -> Run workflow) or by pushing a tag:
+#   git tag image-1 && git push origin image-1
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "image-*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support parted e2fsprogs xz-utils curl openssl
+
+      - name: Download Raspberry Pi OS Lite (64-bit, latest)
+        run: |
+          curl -fL -o base.img.xz https://downloads.raspberrypi.com/raspios_lite_arm64_latest
+          xz -d -k base.img.xz
+
+      - name: Mount image partitions
+        run: |
+          LOOP=$(sudo losetup -fP --show base.img)
+          echo "LOOP=$LOOP" >> "$GITHUB_ENV"
+          sudo mkdir -p /mnt/jb-boot /mnt/jb-root
+          sudo mount "${LOOP}p1" /mnt/jb-boot
+          sudo mount "${LOOP}p2" /mnt/jb-root
+
+      - name: First-boot settings on the boot partition (SSH, default user, splash)
+        run: |
+          sudo touch /mnt/jb-boot/ssh
+          echo "pi:$(openssl passwd -6 jellyby)" | sudo tee /mnt/jb-boot/userconf.txt
+          if ! sudo grep -q "^disable_splash=1" /mnt/jb-boot/config.txt; then
+            echo "disable_splash=1" | sudo tee -a /mnt/jb-boot/config.txt
+          fi
+
+      - name: Run setup.sh in chroot (ARM64 under qemu-user-static)
+        run: |
+          sudo cp -L /etc/resolv.conf /mnt/jb-root/etc/resolv.conf
+          sudo cp /usr/bin/qemu-aarch64-static /mnt/jb-root/usr/bin/
+          sudo mount --bind /dev /mnt/jb-root/dev
+          sudo mount --bind /proc /mnt/jb-root/proc
+          sudo mount --bind /sys /mnt/jb-root/sys
+          sudo cp -a . /mnt/jb-root/root/Jellyby
+          sudo chroot /mnt/jb-root /usr/bin/qemu-aarch64-static /bin/bash -c \
+            "cd /root/Jellyby && JELLYBY_OFFLINE=1 ./setup.sh"
+          sudo rm -rf /mnt/jb-root/root/Jellyby /mnt/jb-root/usr/bin/qemu-aarch64-static
+          sudo sync
+
+      - name: Unmount image
+        run: |
+          sudo umount /mnt/jb-root/dev /mnt/jb-root/proc /mnt/jb-root/sys
+          sudo umount /mnt/jb-root /mnt/jb-boot
+          sudo losetup -d "$LOOP"
+
+      - name: Shrink image with pishrink (auto-expand on first boot), fallback to unshrunk
+        run: |
+          curl -fL -o pishrink.sh https://raw.githubusercontent.com/Drewsif/PiShrink/master/pishrink.sh
+          if ! sudo bash pishrink.sh base.img jellyby-pi4.img; then
+            echo "pishrink failed, using unshrunk image"
+            cp base.img jellyby-pi4.img
+          fi
+          xz -T0 -9 -k jellyby-pi4.img
+          ls -lh jellyby-pi4.img.xz
+
+      - name: Generate Raspberry Pi Imager custom-repo JSON
+        run: |
+          SIZE=$(stat -c%s jellyby-pi4.img.xz)
+          SHA=$(sha256sum jellyby-pi4.img.xz | cut -d' ' -f1)
+          DATE=$(date -u +%Y-%m-%d)
+          python3 - "$SIZE" "$SHA" "$DATE" <<'PY'
+          import json, sys
+          size, sha, date = sys.argv[1], sys.argv[2], sys.argv[3]
+          doc = {"os_list": [{
+            "name": "Jellyby (Raspberry Pi 4)",
+            "description": "Kiosk launcher for Emby / Jellyfin / Plex over HDMI-CEC remote + readsb ADS-B. SSH enabled, default login pi / jellyby (change it).",
+            "url": "https://github.com/pierrepaap/Jellyby",
+            "imagefolder": "https://github.com/pierrepaap/Jellyby/releases/latest/download/",
+            "images": [{
+              "name": "Jellyby Pi 4 (64-bit)",
+              "description": "Ready-to-flash Jellyby image. Boots into the kiosk; SSH enabled (pi / jellyby).",
+              "url": "https://github.com/pierrepaap/Jellyby/releases/latest/download/jellyby-pi4.img.xz",
+              "image_size": int(size),
+              "sha256": sha,
+              "release_date": date,
+              "devices": ["pi4", "pi400"],
+              "os": "Linux",
+              "initformat": "auto"
+            }]
+          }]}
+          with open("jellyby-imager.json", "w") as f:
+            json.dump(doc, f, indent=2)
+          PY
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('image-run-{0}', github.run_number) }}
+          name: Jellyby Pi 4 image (run ${{ github.run_number }})
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: |
+            jellyby-pi4.img.xz
+            jellyby-imager.json
