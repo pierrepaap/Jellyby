@@ -1,0 +1,11 @@
+# readsb configuration. Edit over SSH, then run: sudo systemctl restart readsb
+#
+# readsb always serves Beast output on TCP port 30005 on this Pi. The remote
+# tar1090 container can pull from here (set BEASTHOST=<this-pi-ip> there), or
+# you can push from here to a remote listener with READSB_REMOTE_HOST below.
+
+READSB_OPTIONS="--device-type rtlsdr --gain 49.6 --net --net-bo-port 30005 --max-range 360 --write-json /run/readsb --json-reduce 5"
+
+# Optional: also push Beast output to a remote tar1090 (beast_in).
+# READSB_REMOTE_HOST=192.168.1.50
+# READSB_REMOTE_PORT=30005

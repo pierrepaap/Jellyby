@@ -1,0 +1,19 @@
+[Unit]
+Description=Jellyby kiosk browser
+Wants=jellyby-x.service jellyby-web.service
+After=jellyby-x.service jellyby-web.service
+
+[Service]
+Type=simple
+User=media
+Group=media
+Environment=DISPLAY=:0
+Environment=HOME=/home/media
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+ExecStartPre=/usr/bin/install -d -m 700 -o media -g media /run/user/%U
+ExecStart=/opt/jellyby/kiosk.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

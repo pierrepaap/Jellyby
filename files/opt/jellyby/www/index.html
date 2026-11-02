@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jellyby</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Jellyby</h1>
+  <span id="view-label">home</span>
+</header>
+<main>
+  <section id="view-home" class="view">
+    <div id="tiles" class="tiles nav-scope"></div>
+    <p class="hint">Arrows + OK to navigate &middot; Back = close &middot; Menu key = settings</p>
+  </section>
+
+  <section id="view-settings" class="view hidden">
+    <div class="nav-scope settings">
+      <h2>Apps</h2>
+      <div id="apps-list"></div>
+      <button id="btn-add" class="btn">+ Add app</button>
+
+      <div id="app-form" class="hidden">
+        <h3 id="form-title">Edit app</h3>
+        <div class="field-row">
+          <span class="field-label">Name</span>
+          <button id="field-name" class="field" type="button"></button>
+        </div>
+        <div class="field-row">
+          <span class="field-label">URL</span>
+          <button id="field-url" class="field" type="button"></button>
+        </div>
+        <p class="hint">Select a field and press OK to type with the on-screen keyboard</p>
+        <div class="btn-row">
+          <button id="btn-save" class="btn primary" type="button">Save</button>
+          <button id="btn-cancel" class="btn" type="button">Cancel</button>
+        </div>
+      </div>
+
+      <h2>Services</h2>
+      <div id="status" class="status"></div>
+
+      <h2>System</h2>
+      <div class="btn-row">
+        <button id="btn-reboot" class="btn" type="button">Reboot</button>
+        <button id="btn-poweroff" class="btn" type="button">Power off</button>
+        <button id="btn-home" class="btn" type="button">Back to home</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="osk-overlay" class="hidden">
+  <div class="osk-box">
+    <div id="osk-target" class="osk-target"></div>
+    <div id="osk" class="nav-scope"></div>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
