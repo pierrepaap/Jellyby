@@ -72,7 +72,7 @@ jobs:
           sudo umount /mnt/jb-root /mnt/jb-boot
           sudo losetup -d "$LOOP"
 
-      - name: Shrink image (pishrink, auto-expand on first boot; fallback: unshrunk)
+      - name: Shrink image with pishrink (auto-expand on first boot), fallback to unshrunk
         run: |
           curl -fL -o pishrink.sh https://raw.githubusercontent.com/Drewsif/PiShrink/master/pishrink.sh
           if ! sudo bash pishrink.sh base.img jellyby-pi4.img; then

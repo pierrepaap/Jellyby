@@ -73,7 +73,8 @@ done
 chown -R media:media /etc/jellyby
 
 echo "==> Compiling CEC keyboard daemon"
-gcc -O2 -Wall -o /usr/local/bin/cec-kbd "$FILES/opt/jellyby/cec_kbd.c" $(pkg-config --cflags --libs libcec)
+read -r -a CEC_PKG_ARGS <<< "$(pkg-config --cflags --libs libcec)"
+gcc -O2 -Wall -o /usr/local/bin/cec-kbd "$FILES/opt/jellyby/cec_kbd.c" "${CEC_PKG_ARGS[@]}"
 
 echo "==> Building readsb from source"
 if [[ ! -x /usr/local/bin/readsb ]]; then
