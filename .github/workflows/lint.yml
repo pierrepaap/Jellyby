@@ -8,7 +8,7 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install tools
         run: |
@@ -25,6 +25,11 @@ jobs:
 
       - name: python syntax check
         run: python3 -m py_compile files/opt/jellyby/server.py
+
+      - name: Set up Node (pinned)
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
 
       - name: javascript syntax check
         run: node --check files/opt/jellyby/www/app.js
