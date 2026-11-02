@@ -19,10 +19,10 @@ import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-HOST = "127.0.0.1"
-PORT = 8901
-WWW_DIR = "/opt/jellyby/www"
-CONFIG_PATH = "/etc/jellyby/apps.json"
+HOST = os.environ.get("JELLYBY_HOST", "127.0.0.1")
+PORT = int(os.environ.get("JELLYBY_PORT", "8901"))
+WWW_DIR = os.environ.get("JELLYBY_WWW_DIR", "/opt/jellyby/www")
+CONFIG_PATH = os.environ.get("JELLYBY_CONFIG", "/etc/jellyby/apps.json")
 MAX_APPS = 24
 MAX_BODY = 65536
 URL_RE = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)

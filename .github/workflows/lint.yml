@@ -17,7 +17,7 @@ jobs:
 
       - name: shellcheck
         run: |
-          shellcheck setup.sh files/usr/local/bin/readsb-wrapper.sh files/opt/jellyby/kiosk.sh
+          shellcheck setup.sh scripts/serve-local.sh files/usr/local/bin/readsb-wrapper.sh files/opt/jellyby/kiosk.sh
 
       - name: cec-kbd syntax check against libcec headers
         run: |
@@ -30,4 +30,6 @@ jobs:
         run: node --check files/opt/jellyby/www/app.js
 
       - name: json check
-        run: python3 -m json.tool files/etc/jellyby/apps.json > /dev/null
+        run: |
+          python3 -m json.tool files/etc/jellyby/apps.json > /dev/null
+          python3 -m json.tool imager/jellyby.json > /dev/null

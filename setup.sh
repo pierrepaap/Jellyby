@@ -18,7 +18,9 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-if ! grep -qi raspberry /proc/device-tree/model 2>/dev/null && ! grep -qi raspberry /proc/cpuinfo 2>/dev/null; then
+# JELLYBY_OFFLINE=1: running inside a chroot (image build in CI). Skip the
+# hardware check, hostnamectl and "systemctl enable --now" (no systemd running).
+if [[ "${JELLYBY_OFFLINE:-0}" != "1" ]] && ! grep -qi raspberry /proc/device-tree/model 2>/dev/null && ! grep -qi raspberry /proc/cpuinfo 2>/dev/null; then
   read -r -p "This does not look like a Raspberry Pi. Proceed anyway? [y/N] " ans
   [[ "$ans" =~ ^[Yy]$ ]] || exit 1
 fi
@@ -81,23 +83,33 @@ if [[ ! -x /usr/local/bin/readsb ]]; then
   install -m 755 /opt/readsb-src/readsb /usr/local/bin/readsb
 fi
 
-echo "==> Setting hostname and disabling boot splash"
-hostnamectl set-hostname jellyby 2>/dev/null || true
-for cfg in /boot/firmware/config.txt /boot/config.txt; do
-  if [[ -f "$cfg" ]] && ! grep -q "^disable_splash=1" "$cfg"; then
-    echo "disable_splash=1" >> "$cfg"
-  fi
-done
+if [[ "${JELLYBY_OFFLINE:-0}" != "1" ]]; then
+  echo "==> Setting hostname and disabling boot splash"
+  hostnamectl set-hostname jellyby 2>/dev/null || true
+  for cfg in /boot/firmware/config.txt /boot/config.txt; do
+    if [[ -f "$cfg" ]] && ! grep -q "^disable_splash=1" "$cfg"; then
+      echo "disable_splash=1" >> "$cfg"
+    fi
+  done
+fi
 
 echo "==> Enabling services"
-systemctl enable --now ssh
 systemctl daemon-reload
-systemctl enable --now jellyby-web cec-kbd jellyby-x jellyby-kiosk readsb
+if [[ "${JELLYBY_OFFLINE:-0}" == "1" ]]; then
+  systemctl enable ssh jellyby-web cec-kbd jellyby-x jellyby-kiosk readsb
+else
+  systemctl enable --now ssh
+  systemctl enable --now jellyby-web cec-kbd jellyby-x jellyby-kiosk readsb
+fi
 
 echo
-echo "Jellyby setup complete."
-echo "  - Reboot now (sudo reboot) to enter the kiosk: the launcher appears on HDMI."
-echo "  - Navigate with your projector remote (HDMI-CEC). Menu key = settings."
-echo "  - Add/edit your Emby / Jellyfin / Plex URLs in the on-screen settings."
-echo "  - readsb: edit /etc/default/readsb over SSH, then 'sudo systemctl restart readsb'."
-echo "  - CEC keymap: /etc/jellyby/cec-keymap.conf, then 'sudo systemctl restart cec-kbd'."
+if [[ "${JELLYBY_OFFLINE:-0}" == "1" ]]; then
+  echo "Jellyby setup complete (offline/image-build mode: services enabled, they start on first boot)."
+else
+  echo "Jellyby setup complete."
+  echo "  - Reboot now (sudo reboot) to enter the kiosk: the launcher appears on HDMI."
+  echo "  - Navigate with your projector remote (HDMI-CEC). Menu key = settings."
+  echo "  - Add/edit your Emby / Jellyfin / Plex URLs in the on-screen settings."
+  echo "  - readsb: edit /etc/default/readsb over SSH, then 'sudo systemctl restart readsb'."
+  echo "  - CEC keymap: /etc/jellyby/cec-keymap.conf, then 'sudo systemctl restart cec-kbd'."
+fi

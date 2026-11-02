@@ -1,0 +1,20 @@
+{
+  "os_list": [
+    {
+      "name": "Jellyby (Raspberry Pi 4)",
+      "description": "Kiosk launcher for Emby / Jellyfin / Plex controlled with your HDMI-CEC projector remote, plus a readsb ADS-B receiver. SSH enabled, default login pi / jellyby (change it after first boot).",
+      "url": "https://github.com/pierrepaap/Jellyby",
+      "imagefolder": "https://github.com/pierrepaap/Jellyby/releases/latest/download/",
+      "images": [
+        {
+          "name": "Jellyby Pi 4 (64-bit)",
+          "description": "Ready-to-flash Jellyby image based on Raspberry Pi OS Lite. Boots straight into the kiosk; SSH enabled (pi / jellyby).",
+          "url": "https://github.com/pierrepaap/Jellyby/releases/latest/download/jellyby-pi4.img.xz",
+          "devices": ["pi4", "pi400"],
+          "os": "Linux",
+          "initformat": "auto"
+        }
+      ]
+    }
+  ]
+}
