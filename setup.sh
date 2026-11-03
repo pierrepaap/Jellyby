@@ -41,7 +41,7 @@ apt-get install -y \
   openssh-server sudo \
   git make gcc pkg-config \
   libcec-dev cec-utils \
-  libusb-1.0-0-dev librtlsdr-dev libncurses-dev zlib1g-dev \
+  libusb-1.0-0-dev librtlsdr-dev libncurses-dev zlib1g-dev libzstd-dev \
   python3
 
 echo "==> Creating kiosk user 'media'"
