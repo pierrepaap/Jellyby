@@ -97,6 +97,8 @@ fi
 echo "==> Enabling services"
 if [[ "${JELLYBY_OFFLINE:-0}" == "1" ]]; then
   systemctl enable ssh jellyby-web cec-kbd jellyby-x jellyby-kiosk readsb
+  apt-get clean
+  rm -rf /var/lib/apt/lists/* /opt/readsb-src
 else
   systemctl daemon-reload
   systemctl enable --now ssh
