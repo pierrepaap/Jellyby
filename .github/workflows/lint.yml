@@ -21,7 +21,10 @@ jobs:
 
       - name: cec-kbd syntax check against libcec headers
         run: |
-          gcc -fsyntax-only -Wall $(pkg-config --cflags libcec) files/opt/jellyby/cec_kbd.c
+          CEC_CFLAGS="$(pkg-config --cflags libcec 2>/dev/null || true)"
+          [[ -n "$CEC_CFLAGS" ]] || CEC_CFLAGS="-I/usr/include/libcec"
+          read -r -a CEC_CFLAG_ARGS <<< "$CEC_CFLAGS"
+          gcc -fsyntax-only -Wall "${CEC_CFLAG_ARGS[@]}" files/opt/jellyby/cec_kbd.c
 
       - name: python syntax check
         run: python3 -m py_compile files/opt/jellyby/server.py

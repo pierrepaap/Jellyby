@@ -73,8 +73,14 @@ done
 chown -R media:media /etc/jellyby
 
 echo "==> Compiling CEC keyboard daemon"
-read -r -a CEC_PKG_ARGS <<< "$(pkg-config --cflags --libs libcec)"
-gcc -O2 -Wall -o /usr/local/bin/cec-kbd "$FILES/opt/jellyby/cec_kbd.c" "${CEC_PKG_ARGS[@]}"
+# libcec.pc on Debian/Raspberry Pi OS declares "Requires: p8-platform" but does
+# not ship that .pc, so pkg-config fails; fall back to plain -lcec.
+CEC_LIBS="$(pkg-config --libs libcec 2>/dev/null || true)"
+if [[ -z "${CEC_LIBS// }" ]]; then
+  CEC_LIBS="-lcec"
+fi
+read -r -a CEC_LIB_ARGS <<< "$CEC_LIBS"
+gcc -O2 -Wall -o /usr/local/bin/cec-kbd "$FILES/opt/jellyby/cec_kbd.c" "${CEC_LIB_ARGS[@]}"
 
 echo "==> Building readsb from source"
 if [[ ! -x /usr/local/bin/readsb ]]; then
