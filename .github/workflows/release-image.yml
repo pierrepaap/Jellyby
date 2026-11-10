@@ -90,6 +90,36 @@ jobs:
           xz -T0 -9 -k jellyby-pi4.img
           ls -lh jellyby-pi4.img.xz
 
+      - name: Smoke-test image in QEMU (raspi4b) before publishing
+        run: |
+          sudo apt-get install -y qemu-system-arm qemu-utils sshpass
+          sudo bash scripts/test-image-qemu.sh jellyby-pi4.img 2222
+
+      - name: Package PINN repository assets (os_list_v3.json + partition tarballs)
+        run: |
+          mkdir -p pinn-out /mnt/pb /mnt/pr
+          LOOP2=$(sudo losetup -fP --show jellyby-pi4.img)
+          sudo mount "${LOOP2}p1" /mnt/pb
+          sudo mount "${LOOP2}p2" /mnt/pr
+          BOOT_MIB=$(sudo du -sm /mnt/pb | cut -f1)
+          ROOT_MIB=$(sudo du -sm /mnt/pr | cut -f1)
+          sudo tar -cJf pinn-out/boot.tar.xz --exclude='lost+found' -C /mnt/pb .
+          sudo tar -cJf pinn-out/rootfs.tar.xz --exclude='lost+found' -C /mnt/pr .
+          sudo umount /mnt/pb /mnt/pr
+          sudo losetup -d "$LOOP2"
+          python3 scripts/gen-pinn.py \
+            --out pinn-out \
+            --boot-tar pinn-out/boot.tar.xz \
+            --rootfs-tar pinn-out/rootfs.tar.xz \
+            --boot-mib "$BOOT_MIB" --root-mib "$ROOT_MIB" \
+            --base-url "https://github.com/pierrepaap/Jellyby/releases/latest/download" \
+            --date "$(date -u +%Y-%m-%d)" \
+            --version "${{ github.event.release.tag_name }}"
+          cp pinn/partition_setup.sh pinn-out/
+          cp pinn/Jellyby.png pinn-out/
+          cp pinn/marketing.tar pinn-out/
+          ls -lh pinn-out
+
       - name: Generate Raspberry Pi Imager custom-repo JSON
         run: |
           SIZE=$(stat -c%s jellyby-pi4.img.xz)
@@ -129,3 +159,4 @@ jobs:
           files: |
             jellyby-pi4.img.xz
             jellyby-imager.json
+            pinn-out/*
