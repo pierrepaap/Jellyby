@@ -96,6 +96,9 @@ qemu-system-aarch64 -M raspi4b -cpu cortex-a72 -smp 4 -m 4096 \
   -drive file=pi-os-lite.img,format=raw,if=sd \
   -netdev user,id=n0,hostfwd=tcp::2222-:22 -device usb-net,netdev=n0 -nographic
 # kernel8.img / bcm2711-rpi-4-b.dtb: copy them from the boot partition of the image
+# (QEMU >= 9 also has -M raspi4b; Ubuntu 24.04's QEMU 8.x only has raspi3b, which
+#  boots the same kernel8.img with bcm2710-rpi-3-b-plus.dtb — scripts/test-image-qemu.sh
+#  picks the best available machine automatically)
 # ssh -p 2222 pi@127.0.0.1  →  sudo ./setup.sh, systemctl status, curl 127.0.0.1:8901/api/config
 ```
 
