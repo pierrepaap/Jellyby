@@ -11,13 +11,11 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck gcc pkg-config libcec-dev python3
+        run: sudo bash scripts/ci-apt.sh shellcheck gcc pkg-config libcec-dev python3
 
       - name: shellcheck
         run: |
-          shellcheck setup.sh scripts/serve-local.sh scripts/test-image-qemu.sh files/usr/local/bin/readsb-wrapper.sh files/opt/jellyby/kiosk.sh pinn/partition_setup.sh
+          shellcheck setup.sh scripts/ci-apt.sh scripts/serve-local.sh scripts/test-image-qemu.sh files/usr/local/bin/readsb-wrapper.sh files/opt/jellyby/kiosk.sh pinn/partition_setup.sh
 
       - name: cec-kbd syntax check against libcec headers
         run: |
