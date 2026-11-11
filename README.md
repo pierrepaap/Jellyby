@@ -99,6 +99,47 @@ qemu-system-aarch64 -M raspi4b -cpu cortex-a72 -smp 4 -m 4096 \
 # ssh -p 2222 pi@127.0.0.1  →  sudo ./setup.sh, systemctl status, curl 127.0.0.1:8901/api/config
 ```
 
+### Smoke-test a built image in QEMU before flashing
+
+`scripts/test-image-qemu.sh` boots the **actual release image** in QEMU, waits
+for SSH, and runs automated checks — hard-fail if the image doesn't boot or the
+launcher web app isn't served; soft warnings for the parts that need real
+hardware (headless-Chromium render of the UI, RTL-SDR/CEC presence). The
+release pipeline runs this automatically **before** attaching assets to a
+release, so a published image has already booted once in CI:
+
+```bash
+sudo apt install qemu-system-arm qemu-utils sshpass
+xz -d jellyby-pi4.img.xz
+sudo bash scripts/test-image-qemu.sh jellyby-pi4.img 2222   # logs in as pi/jellyby
+```
+
+Cannot be emulated: real HDMI-CEC remote interaction and GPU video playback —
+those still need one boot on the Pi.
+
+## Install — option C: as a multiboot entry in PINN
+
+Every release also ships **PINN** assets (`os_list_v3.json`, `os.json`,
+`partitions.json`, `partition_setup.sh`, `boot.tar.xz`, `rootfs.tar.xz`, icon
+and `marketing.tar`), so Jellyby can be installed alongside other OSes on one
+SD card via [PINN](https://github.com/procount/pinn):
+
+1. Boot PINN on the SD card, edit `recovery.cmdline` on PINN's boot partition
+   and append:
+
+   ```
+   alt_image_source=https://github.com/pierrepaap/Jellyby/releases/latest/download/os_list_v3.json
+   ```
+
+2. Reboot PINN — **Jellyby** appears in the OS list (group "Media"). Tick it
+   together with any other OSes and press Install.
+3. PINN writes the partitions, untars them and runs `partition_setup.sh`, which
+   rewrites `cmdline.txt`/`fstab` to the new PARTUUIDs. On first boot the
+   image's own resize step expands the rootfs to the (maximised) partition.
+
+The PINN assets live flat in each release, e.g.
+`https://github.com/pierrepaap/Jellyby/releases/latest/download/os_list_v3.json`.
+
 ## Using the kiosk
 
 - Home screen: one tile per configured server. Selecting a tile opens that web
@@ -157,11 +198,13 @@ Plug the RTL-SDR dongle into the Pi before (re)starting the service.
 ## Image build pipeline
 
 `.github/workflows/release-image.yml` builds the flashable image in CI: it
-downloads the latest Pi OS Lite (64-bit), mounts the image, enables SSH +
-default user on the boot partition, runs `setup.sh` in a chroot under
+downloads the latest Pi OS Lite (64-bit), grows and mounts the image, enables
+SSH + default user on the boot partition, runs `setup.sh` in a chroot under
 `qemu-user-static` (`JELLYBY_OFFLINE=1` mode), shrinks the image with PiShrink
-(auto-expands on first boot), and attaches `jellyby-pi4.img.xz` plus a
-ready-made `jellyby-imager.json` (with sha256/size) to the release.
+(auto-expands on first boot), **smoke-tests the result by booting it in QEMU**
+(`scripts/test-image-qemu.sh` — no assets are published if this fails), packs
+the PINN assets, and attaches `jellyby-pi4.img.xz`, `jellyby-imager.json`
+(with sha256/size) and the `pinn-out/*` files to the release.
 
 **Single trigger: publish a GitHub release** (Releases → New release → choose
 a tag like `v0.2.0` → mark as latest → Publish). The workflow then builds the
@@ -183,6 +226,9 @@ versioned release.
 ```
 setup.sh                        provisioning script (run once as root on the Pi, or in CI chroot)
 scripts/serve-local.sh          run the launcher UI on any PC for testing
+scripts/test-image-qemu.sh      boot a built image in QEMU and smoke-test it over SSH
+scripts/gen-pinn.py             generate PINN metafiles (os_list_v3.json, os.json, partitions.json)
+pinn/                           PINN repo templates: partition_setup.sh, Jellyby.png, marketing.tar
 imager/jellyby.json             Raspberry Pi Imager custom-repo list (reference copy)
 files/etc/systemd/system/       service units
 files/etc/jellyby/              apps.json (default tiles) + cec-keymap.conf
