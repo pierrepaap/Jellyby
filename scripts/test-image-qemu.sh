@@ -31,6 +31,12 @@ else
 fi
 echo "using machine: $MACHINE (dtb $DTB, ${MEM}M)"
 
+# QEMU's emulated SD card requires a power-of-2 image size; pishrink output is not.
+# Boot a resized copy so the release artifact itself stays untouched.
+cp --reflink=auto "$IMG" "$WORK/test.img"
+qemu-img resize "$WORK/test.img" 8G
+IMG="$WORK/test.img"
+
 # extract kernel + dtb from the image's boot partition
 LOOP=$(sudo losetup -fP --show "$IMG")
 sudo mkdir -p /mnt/qb-boot
