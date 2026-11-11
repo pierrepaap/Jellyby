@@ -17,17 +17,32 @@ PORT="${2:-2222}"
 WORK="$(mktemp -d /tmp/jellyby-qemu.XXXXXX)"
 echo "workdir: $WORK"
 
+# pick the best raspi machine this QEMU build supports: raspi4b needs QEMU >= 9.x;
+# the QEMU 8.x shipped by Ubuntu 24.04 only has raspi3b, which boots the same
+# arm64 kernel8.img with the Pi 3 DTB
+MACHINES=$(qemu-system-aarch64 -machine help 2>/dev/null || true)
+if echo "$MACHINES" | grep -qw raspi4b; then
+  MACHINE=raspi4b; DTB=bcm2711-rpi-4-b.dtb; MEM=4096; CPU=cortex-a72
+elif echo "$MACHINES" | grep -qw raspi3b; then
+  MACHINE=raspi3b; DTB=bcm2710-rpi-3-b-plus.dtb; MEM=1024; CPU=cortex-a53
+else
+  echo "FAIL: this qemu-system-aarch64 has no raspi machine (need raspi4b or raspi3b)"
+  exit 1
+fi
+echo "using machine: $MACHINE (dtb $DTB, ${MEM}M)"
+
 # extract kernel + dtb from the image's boot partition
 LOOP=$(sudo losetup -fP --show "$IMG")
 sudo mkdir -p /mnt/qb-boot
 sudo mount "${LOOP}p1" /mnt/qb-boot
-sudo cp /mnt/qb-boot/kernel8.img /mnt/qb-boot/bcm2711-rpi-4-b.dtb "$WORK/"
+sudo cp /mnt/qb-boot/kernel8.img "$WORK/"
+sudo cp "/mnt/qb-boot/$DTB" "$WORK/" 2>/dev/null || sudo cp /mnt/qb-boot/bcm2711-rpi-4-b.dtb "$WORK/$DTB"
 sudo umount /mnt/qb-boot
 sudo losetup -d "$LOOP"
 
-qemu-system-aarch64 -M raspi4b -cpu cortex-a72 -smp 4 -m 4096 \
-  -kernel "$WORK/kernel8.img" -dtb "$WORK/bcm2711-rpi-4-b.dtb" \
-  -append "rw root=/dev/mmcblk0p2 rootfstype=ext4 rootwait console=ttyAMA0" \
+qemu-system-aarch64 -M "$MACHINE" -cpu "$CPU" -smp 4 -m "$MEM" \
+  -kernel "$WORK/kernel8.img" -dtb "$WORK/$DTB" \
+  -append "rw root=/dev/mmcblk0p2 rootfstype=ext4 rootwait console=ttyAMA0 dwc_otg.lpm_enable=0" \
   -drive file="$IMG",format=raw,if=sd \
   -netdev "user,id=n0,hostfwd=tcp::${PORT}-:22" -device usb-net,netdev=n0 \
   -display none -serial "file:$WORK/console.log" &
