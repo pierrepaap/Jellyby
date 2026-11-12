@@ -90,15 +90,16 @@ services, the readsb build and the HTTP API — but it has **no GPU (V3D) and no
 HDMI-CEC**, so the kiosk UI and remote cannot be tested there:
 
 ```bash
-qemu-system-aarch64 -M raspi4b -cpu cortex-a72 -smp 4 -m 4096 \
-  -kernel kernel8.img -dtb bcm2711-rpi-4-b.dtb \
-  -append "rw root=/dev/mmcblk0p2 rootfstype=ext4 console=ttyAMA0" \
+# easiest: let the script do it (boots via the image's own firmware, raspi4b on
+# QEMU >= 9 else raspi3b, console on ttyAMA0, SSH on host port 2222):
+sudo bash scripts/test-image-qemu.sh pi-os-lite.img 2222
+# manual equivalent (firmware boot from the SD image; enable_uart=1 +
+# dtoverlay=disable-bt in config.txt are required or the Pi 3's UART goes to
+# Bluetooth and QEMU shows no console):
+qemu-system-aarch64 -M raspi3b -smp 4 -m 1024 \
   -drive file=pi-os-lite.img,format=raw,if=sd \
-  -netdev user,id=n0,hostfwd=tcp::2222-:22 -device usb-net,netdev=n0 -nographic
-# kernel8.img / bcm2711-rpi-4-b.dtb: copy them from the boot partition of the image
-# (QEMU >= 9 also has -M raspi4b; Ubuntu 24.04's QEMU 8.x only has raspi3b, which
-#  boots the same kernel8.img with bcm2710-rpi-3-b-plus.dtb — scripts/test-image-qemu.sh
-#  picks the best available machine automatically)
+  -netdev user,id=n0,hostfwd=tcp::2222-:22 -device usb-net,netdev=n0 \
+  -display none -serial file:console.log
 # ssh -p 2222 pi@127.0.0.1  →  sudo ./setup.sh, systemctl status, curl 127.0.0.1:8901/api/config
 ```
 
