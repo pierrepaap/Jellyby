@@ -28,14 +28,8 @@ jobs:
 
       - name: Install build tools
         run: |
-          for i in 1 2 3 4 5; do
-            sudo apt-get -o Acquire::Retries=10 update && break
-            echo "apt-get update failed (attempt $i), retrying after 15s"; sleep 15
-          done
-          for i in 1 2 3 4 5; do
-            sudo apt-get install -y -o Acquire::Retries=10 --fix-missing qemu-user-static binfmt-support parted e2fsprogs xz-utils curl openssl cloud-guest-utils && break
-            echo "apt-get install failed (attempt $i), retrying after 15s"; sleep 15
-          done
+          sudo bash scripts/ci-apt.sh qemu-user-static binfmt-support parted e2fsprogs xz-utils curl openssl cloud-guest-utils
+          test -x /usr/bin/qemu-aarch64-static   # guard: apt must not have skipped it
 
       - name: Download Raspberry Pi OS Lite (64-bit, latest)
         run: |
@@ -96,12 +90,10 @@ jobs:
           xz -T0 -9 -k jellyby-pi4.img
           ls -lh jellyby-pi4.img.xz
 
-      - name: Smoke-test image in QEMU (raspi4b) before publishing
+      - name: Smoke-test image in QEMU (raspi4b or raspi3b, auto-detected) before publishing
         run: |
-          for i in 1 2 3 4 5; do
-            sudo apt-get install -y -o Acquire::Retries=10 --fix-missing qemu-system-arm qemu-utils sshpass && break
-            echo "apt-get install failed (attempt $i), retrying after 15s"; sleep 15
-          done
+          sudo bash scripts/ci-apt.sh qemu-system-arm qemu-utils sshpass
+          command -v qemu-system-aarch64 >/dev/null && command -v sshpass >/dev/null
           sudo bash scripts/test-image-qemu.sh jellyby-pi4.img 2222
 
       - name: Package PINN repository assets (os_list_v3.json + partition tarballs)
