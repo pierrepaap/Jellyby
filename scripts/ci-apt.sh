@@ -10,11 +10,15 @@ sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
 
 APTOPTS=(-o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::DNS::Timeout=10)
 
+updated=0
 for i in 1 2 3 4 5; do
-  if sudo apt-get "${APTOPTS[@]}" update; then break; fi
+  if sudo apt-get "${APTOPTS[@]}" update; then updated=1; break; fi
   echo "apt-get update attempt $i failed; retrying in 15s" >&2
   sleep 15
 done
+if [ "$updated" -ne 1 ]; then
+  echo "apt-get update failed after 5 attempts (proceeding with cached lists)" >&2
+fi
 
 for i in 1 2 3 4 5; do
   if sudo apt-get install -y "${APTOPTS[@]}" --fix-missing "$@"; then exit 0; fi
