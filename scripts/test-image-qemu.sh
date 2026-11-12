@@ -107,6 +107,11 @@ check "launcher API returns apps"      "curl -sf http://127.0.0.1:8901/api/confi
 check "static assets served"           "curl -sf http://127.0.0.1:8901/static/app.js | grep -q addEventListener"
 check "cec-kbd binary installed"       "test -x /usr/local/bin/cec-kbd"
 check "readsb binary installed"        "test -x /usr/local/bin/readsb"
+check "mpv installed (native player)"  "command -v mpv"
+check "play.sh + netapply.sh present"  "test -x /opt/jellyby/play.sh -a -x /opt/jellyby/netapply.sh"
+check "boot config has vc4-kms-v3d"    "grep -q 'dtoverlay=vc4-kms-v3d' /boot/firmware/config.txt"
+check "boot config has gpu_mem=256"    "grep -q 'gpu_mem=256' /boot/firmware/config.txt"
+check "media user in video group"      "id -nG media | grep -qw video"
 warn  "headless Chromium renders launcher" "timeout 600 sudo -u media chromium --headless=new --no-sandbox --disable-gpu --dump-dom http://127.0.0.1:8901 | grep -q launcher"
 warn  "readsb service active (needs RTL-SDR dongle)" "systemctl is-active --quiet readsb"
 

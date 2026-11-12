@@ -1,12 +1,23 @@
 #!/bin/bash
 # Launch the kiosk browser against the local Jellyby launcher.
+# Sandbox stays ENABLED (the launcher loads remote web UIs). On Pi OS Bookworm
+# unprivileged user namespaces are on by default (kernel.unprivileged_userns_clone=1);
+# if Chromium ever complains, set that sysctl — do NOT re-add --no-sandbox.
 set -euo pipefail
 
 BIN="$(command -v chromium || command -v chromium-browser)"
 
+# wait for X to be ready instead of relying on Restart=always
+echo "waiting for X display :0 ..."
+for _ in $(seq 1 30); do
+  if [ -e /tmp/.X11-unix/X0 ] && xset -display :0 q >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
 exec "$BIN" \
   --kiosk \
-  --no-sandbox \
   --disable-breakpad \
   --no-first-run \
   --no-default-browser-check \

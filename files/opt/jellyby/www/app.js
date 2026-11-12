@@ -4,12 +4,29 @@ const state = {
   apps: [],
   view: "home",
   editingIndex: -1,
-  form: { name: "", url: "" },
+  form: { name: "", url: "", type: "browser", server: "url", item: "" },
   oskTarget: null,
   confirmAction: null,
+  net: { interfaces: [], ifaceIdx: 0, mode: "dhcp", confirm: false },
+  netForm: { address: "", gateway: "", dns: "" },
 };
 
 const $ = (sel) => document.querySelector(sel);
+
+const APP_TYPES = [
+  { value: "mpv", label: "mpv (native HEVC)" },
+  { value: "browser", label: "browser tab" },
+];
+const APP_SERVERS = [
+  { value: "url", label: "url" },
+  { value: "jellyfin", label: "jellyfin" },
+  { value: "emby", label: "emby" },
+  { value: "plex", label: "plex" },
+];
+const OSK_LABELS = {
+  name: "Name", url: "URL", item: "Item ID",
+  "net-address": "Address/CIDR", "net-gateway": "Gateway", "net-dns": "DNS (comma sep.)",
+};
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -70,6 +87,12 @@ function moveFocus(dx, dy) {
   if (best) best.focus();
 }
 
+function cycleValue(list, current, dir) {
+  const i = list.findIndex((x) => x.value === current);
+  const n = list[(i + dir + list.length) % list.length];
+  return n.value;
+}
+
 function goBack() {
   if (state.oskTarget) {
     closeOsk(false);
@@ -97,6 +120,15 @@ document.addEventListener("keydown", (e) => {
     }
     return;
   }
+  const cur = document.activeElement;
+  if (cur && cur.classList && cur.classList.contains("cycle")) {
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      cur.dataset.dir = e.key === "ArrowLeft" ? "-1" : "1";
+      cur.click();
+      return;
+    }
+  }
   switch (e.key) {
     case "ArrowUp": e.preventDefault(); moveFocus(0, -1); break;
     case "ArrowDown": e.preventDefault(); moveFocus(0, 1); break;
@@ -112,9 +144,9 @@ document.addEventListener("keydown", (e) => {
       setView(state.view === "home" ? "settings" : "home");
       break;
     case " ":
-      if (document.activeElement && document.activeElement.tagName === "A") {
+      if (cur && cur.tagName === "A") {
         e.preventDefault();
-        document.activeElement.click();
+        cur.click();
       }
       break;
     default:
@@ -129,10 +161,12 @@ function setView(view) {
   $("#view-home").classList.toggle("hidden", view !== "home");
   $("#view-settings").classList.toggle("hidden", view !== "settings");
   $("#view-label").textContent = view;
-  if (view === "settings") refreshStatus();
+  if (view === "settings") { refreshStatus(); refreshNet(); }
   const els = focusables();
   if (els.length) els[0].focus();
 }
+
+/* ---------- home tiles + launch ---------- */
 
 function renderHome() {
   const grid = $("#tiles");
@@ -144,15 +178,30 @@ function renderHome() {
     grid.appendChild(p);
   }
   for (const app of state.apps) {
-    const a = document.createElement("a");
-    a.className = "tile";
-    a.href = app.url;
-    a.target = "_blank";
-    a.rel = "noopener";
-    const span = document.createElement("span");
-    span.textContent = app.name;
-    a.appendChild(span);
-    grid.appendChild(a);
+    if (app.type === "mpv") {
+      const b = document.createElement("button");
+      b.className = "tile tile-mpv";
+      b.type = "button";
+      const span = document.createElement("span");
+      span.textContent = app.name;
+      const badge = document.createElement("em");
+      badge.className = "tile-badge";
+      badge.textContent = "MPV";
+      b.appendChild(span);
+      b.appendChild(badge);
+      b.addEventListener("click", () => launchApp(app));
+      grid.appendChild(b);
+    } else {
+      const a = document.createElement("a");
+      a.className = "tile";
+      a.href = app.url;
+      a.target = "_blank";
+      a.rel = "noopener";
+      const span = document.createElement("span");
+      span.textContent = app.name;
+      a.appendChild(span);
+      grid.appendChild(a);
+    }
   }
   const gear = document.createElement("button");
   gear.className = "tile tile-settings";
@@ -161,6 +210,31 @@ function renderHome() {
   gear.addEventListener("click", () => setView("settings"));
   grid.appendChild(gear);
 }
+
+async function launchApp(app) {
+  if (app.type !== "mpv") {
+    window.open(app.url, "_blank", "noopener");
+    return;
+  }
+  try {
+    const res = await api("/api/launch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: app.name }),
+    });
+    if (res.mode === "mpv") {
+      showToast(app.name + " playing in MPV (native HEVC) — exit key on the remote returns here");
+    } else {
+      showToast("MPV could not resolve a stream — opening browser instead" + (res.reason ? " (" + res.reason + ")" : ""), true);
+      window.open(res.url || app.url, "_blank", "noopener");
+    }
+  } catch (err) {
+    showToast(err.message + " — opening browser", true);
+    window.open(app.url, "_blank", "noopener");
+  }
+}
+
+/* ---------- settings: apps ---------- */
 
 function renderSettings() {
   const list = $("#apps-list");
@@ -172,7 +246,7 @@ function renderSettings() {
     info.className = "app-info";
     const name = document.createElement("div");
     name.className = "app-name";
-    name.textContent = app.name;
+    name.textContent = app.name + "  [" + app.type + (app.server !== "url" ? "/" + app.server : "") + "]";
     const url = document.createElement("div");
     url.className = "app-url";
     url.textContent = app.url;
@@ -196,6 +270,11 @@ function renderSettings() {
   renderForm();
 }
 
+function cycleLabel(list, value) {
+  const f = list.find((x) => x.value === value);
+  return f ? f.label : value;
+}
+
 function renderForm() {
   const form = $("#app-form");
   const editing = state.editingIndex >= 0;
@@ -206,6 +285,10 @@ function renderForm() {
   $("#field-name").appendChild(fieldText(state.form.name));
   $("#field-url").innerHTML = "";
   $("#field-url").appendChild(fieldText(state.form.url));
+  $("#field-item").innerHTML = "";
+  $("#field-item").appendChild(fieldText(state.form.item || ""));
+  $("#field-type").textContent = cycleLabel(APP_TYPES, state.form.type);
+  $("#field-server").textContent = cycleLabel(APP_SERVERS, state.form.server);
 }
 
 function fieldText(value) {
@@ -219,14 +302,15 @@ function fieldText(value) {
 
 function startEdit(i) {
   state.editingIndex = i;
-  state.form = { name: state.apps[i].name, url: state.apps[i].url };
+  const a = state.apps[i];
+  state.form = { name: a.name, url: a.url, type: a.type || "browser", server: a.server || "url", item: a.item || "" };
   renderForm();
   $("#field-name").focus();
 }
 
 function startAdd() {
   state.editingIndex = state.apps.length;
-  state.form = { name: "", url: "http://" };
+  state.form = { name: "", url: "http://", type: "browser", server: "url", item: "" };
   renderForm();
   $("#field-name").focus();
 }
@@ -242,8 +326,9 @@ async function saveForm() {
   const url = state.form.url.trim();
   if (!name) return showToast("Name is required", true);
   if (!/^https?:\/\//i.test(url)) return showToast("URL must start with http:// or https://", true);
+  const entry = { name, url, type: state.form.type, server: state.form.server };
+  if (state.form.item.trim()) entry.item = state.form.item.trim();
   const apps = state.apps.slice();
-  const entry = { name, url };
   if (state.editingIndex < apps.length) apps[state.editingIndex] = entry;
   else apps.push(entry);
   try {
@@ -278,6 +363,66 @@ async function deleteApp(i) {
   }
 }
 
+/* ---------- settings: network ---------- */
+
+async function refreshNet() {
+  try {
+    const data = await api("/api/network");
+    state.net.interfaces = data.interfaces || [];
+    if (!state.net.interfaces.length) {
+      $("#net-current").textContent = "no interfaces found";
+      return;
+    }
+    if (state.net.ifaceIdx >= state.net.interfaces.length) state.net.ifaceIdx = 0;
+    const cur = state.net.interfaces[state.net.ifaceIdx];
+    $("#net-current").textContent =
+      state.net.interfaces.map((i) =>
+        `${i.name} (${i.type}): ${i.state}${i.address ? " " + i.address : ""}${i.method ? " via " + i.method : ""}`
+      ).join("  ·  ");
+    $("#net-iface").textContent = cur.name;
+    $("#net-mode").textContent = state.net.mode === "dhcp" ? "DHCP" : "Static";
+    $("#net-static-fields").classList.toggle("hidden", state.net.mode !== "static");
+    if (state.net.mode === "static") {
+      $("#net-address").innerHTML = ""; $("#net-address").appendChild(fieldText(state.netForm.address || (cur.address || "")));
+      $("#net-gateway").innerHTML = ""; $("#net-gateway").appendChild(fieldText(state.netForm.gateway || (cur.gateway || "")));
+      $("#net-dns").innerHTML = ""; $("#net-dns").appendChild(fieldText(state.netForm.dns || (cur.dns || []).join(",")));
+    }
+  } catch (err) {
+    $("#net-current").textContent = "network state unavailable: " + err.message;
+  }
+}
+
+async function applyNet(btn) {
+  if (!state.net.confirm) {
+    state.net.confirm = true;
+    btn.classList.add("danger-armed");
+    btn.textContent = "Press again to APPLY (may drop this connection)";
+    setTimeout(() => { state.net.confirm = false; btn.classList.remove("danger-armed"); btn.textContent = "Apply network"; }, 4000);
+    return;
+  }
+  state.net.confirm = false;
+  btn.classList.remove("danger-armed");
+  btn.textContent = "Apply network";
+  const cur = state.net.interfaces[state.net.ifaceIdx];
+  const payload = { interface: cur.name, mode: state.net.mode, confirm: true };
+  if (state.net.mode === "static") {
+    payload.address = state.netForm.address.trim() || $("#net-address").textContent.trim();
+    payload.gateway = state.netForm.gateway.trim() || $("#net-gateway").textContent.trim();
+    payload.dns = (state.netForm.dns.trim() || $("#net-dns").textContent.trim()).split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  try {
+    await api("/api/network", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    showToast("Network applied — if you lose SSH, revert with: sudo /opt/jellyby/netapply.sh " + cur.name + " dhcp");
+    await refreshNet();
+  } catch (err) {
+    showToast(err.message, true);
+  }
+}
+
 /* ---------- on-screen keyboard ---------- */
 
 const OSK_ROWS = [
@@ -285,13 +430,26 @@ const OSK_ROWS = [
   ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
   ["a", "s", "d", "f", "g", "h", "j", "k", "l", ";"],
   ["z", "x", "c", "v", "b", "n", "m", ".", "-", "/"],
-  ["@", ":", "_", "⌫", "␣", "OK", "CANCEL"],
+  ["@", ":", "_", ",", "⌫", "␣", "OK", "CANCEL"],
 ];
+
+function oskValue() {
+  const t = state.oskTarget;
+  if (!t) return "";
+  if (t.startsWith("net-")) return state.netForm[t.slice(4)] || "";
+  return state.form[t] || "";
+}
+
+function oskSet(v) {
+  const t = state.oskTarget;
+  if (!t) return;
+  if (t.startsWith("net-")) state.netForm[t.slice(4)] = v;
+  else state.form[t] = v;
+}
 
 function openOsk(target) {
   state.oskTarget = target;
-  $("#osk-target").textContent =
-    (target === "name" ? "Name: " : "URL: ") + state.form[target];
+  $("#osk-target").textContent = (OSK_LABELS[target] || target) + ": " + oskValue();
   const osk = $("#osk");
   osk.innerHTML = "";
   for (const row of OSK_ROWS) {
@@ -314,6 +472,7 @@ function closeOsk() {
   state.oskTarget = null;
   $("#osk-overlay").classList.add("hidden");
   renderForm();
+  refreshNet();
   if (state.editingIndex >= 0) {
     const f = $("#field-" + (state.lastTarget || "name"));
     (f || $("#btn-save")).focus();
@@ -321,14 +480,15 @@ function closeOsk() {
 }
 
 function oskPress(k) {
-  const t = state.oskTarget;
-  if (!t) return;
+  if (!state.oskTarget) return;
+  let v = oskValue();
   if (k === "OK") return closeOsk(true);
   if (k === "CANCEL") return closeOsk(false);
-  if (k === "⌫") state.form[t] = state.form[t].slice(0, -1);
-  else if (k === "␣") state.form[t] += " ";
-  else state.form[t] += k;
-  $("#osk-target").textContent = (t === "name" ? "Name: " : "URL: ") + state.form[t];
+  if (k === "⌫") v = v.slice(0, -1);
+  else if (k === "␣") v += " ";
+  else v += k;
+  oskSet(v);
+  $("#osk-target").textContent = (OSK_LABELS[state.oskTarget] || state.oskTarget) + ": " + v;
 }
 
 /* ---------- status & system ---------- */
@@ -342,7 +502,6 @@ async function refreshStatus() {
       const b = document.createElement("span");
       b.className = "badge";
       const ok = st === "active";
-      b.innerHTML = "";
       const name = document.createElement("b");
       name.textContent = svc;
       const val = document.createElement("span");
@@ -392,6 +551,31 @@ $("#btn-save").addEventListener("click", saveForm);
 $("#btn-cancel").addEventListener("click", cancelForm);
 $("#field-name").addEventListener("click", () => { state.lastTarget = "name"; openOsk("name"); });
 $("#field-url").addEventListener("click", () => { state.lastTarget = "url"; openOsk("url"); });
+$("#field-item").addEventListener("click", () => { state.lastTarget = "item"; openOsk("item"); });
+$("#field-type").addEventListener("click", (e) => {
+  const dir = Number(e.target.dataset.dir || 1);
+  state.form.type = cycleValue(APP_TYPES, state.form.type, dir);
+  renderForm();
+});
+$("#field-server").addEventListener("click", (e) => {
+  const dir = Number(e.target.dataset.dir || 1);
+  state.form.server = cycleValue(APP_SERVERS, state.form.server, dir);
+  renderForm();
+});
+$("#net-iface").addEventListener("click", (e) => {
+  const dir = Number(e.target.dataset.dir || 1);
+  state.net.ifaceIdx = (state.net.ifaceIdx + dir + state.net.interfaces.length) % Math.max(1, state.net.interfaces.length);
+  refreshNet();
+});
+$("#net-mode").addEventListener("click", (e) => {
+  const dir = Number(e.target.dataset.dir || 1);
+  state.net.mode = cycleValue([{ value: "dhcp" }, { value: "static" }], state.net.mode, dir);
+  refreshNet();
+});
+$("#net-address").addEventListener("click", () => { state.lastTarget = "net-address"; openOsk("net-address"); });
+$("#net-gateway").addEventListener("click", () => { state.lastTarget = "net-gateway"; openOsk("net-gateway"); });
+$("#net-dns").addEventListener("click", () => { state.lastTarget = "net-dns"; openOsk("net-dns"); });
+$("#btn-net-apply").addEventListener("click", (e) => applyNet(e.target));
 $("#btn-reboot").addEventListener("click", (e) => systemAction("reboot", e.target));
 $("#btn-poweroff").addEventListener("click", (e) => systemAction("poweroff", e.target));
 $("#btn-home").addEventListener("click", () => setView("home"));

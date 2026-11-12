@@ -14,7 +14,7 @@
 <main>
   <section id="view-home" class="view">
     <div id="tiles" class="tiles nav-scope"></div>
-    <p class="hint">Arrows + OK to navigate &middot; Back = close &middot; Menu key = settings</p>
+    <p class="hint">Arrows + OK to navigate &middot; Back = close &middot; Menu key = settings &middot; MPV tiles play natively (HEVC hwdec), browser tiles open in a tab</p>
   </section>
 
   <section id="view-settings" class="view hidden">
@@ -33,12 +33,53 @@
           <span class="field-label">URL</span>
           <button id="field-url" class="field" type="button"></button>
         </div>
-        <p class="hint">Select a field and press OK to type with the on-screen keyboard</p>
+        <div class="field-row">
+          <span class="field-label">Playback</span>
+          <button id="field-type" class="field cycle" type="button" title="OK or Left/Right to change"></button>
+        </div>
+        <div class="field-row">
+          <span class="field-label">Server</span>
+          <button id="field-server" class="field cycle" type="button" title="OK or Left/Right to change"></button>
+        </div>
+        <div class="field-row">
+          <span class="field-label">Item ID</span>
+          <button id="field-item" class="field" type="button"></button>
+        </div>
+        <p class="hint">Select a field and press OK to type with the on-screen keyboard. Playback: "mpv (native)" = Pi 4 hardware decode via MPV; "browser" = Chromium tab. Server: jellyfin/emby for mpv, plex/url for browser. Item ID: optional Jellyfin/Emby item to play (empty = latest added). Credentials go in /etc/jellyby/players.json over SSH.</p>
         <div class="btn-row">
           <button id="btn-save" class="btn primary" type="button">Save</button>
           <button id="btn-cancel" class="btn" type="button">Cancel</button>
         </div>
       </div>
+
+      <h2>Network</h2>
+      <div id="net-current" class="hint">loading&hellip;</div>
+      <div class="field-row">
+        <span class="field-label">Interface</span>
+        <button id="net-iface" class="field cycle" type="button"></button>
+      </div>
+      <div class="field-row">
+        <span class="field-label">Mode</span>
+        <button id="net-mode" class="field cycle" type="button"></button>
+      </div>
+      <div id="net-static-fields">
+        <div class="field-row">
+          <span class="field-label">Address</span>
+          <button id="net-address" class="field" type="button"></button>
+        </div>
+        <div class="field-row">
+          <span class="field-label">Gateway</span>
+          <button id="net-gateway" class="field" type="button"></button>
+        </div>
+        <div class="field-row">
+          <span class="field-label">DNS (,)</span>
+          <button id="net-dns" class="field" type="button"></button>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button id="btn-net-apply" class="btn danger" type="button">Apply network</button>
+      </div>
+      <p class="hint">A wrong static config can drop SSH. Apply asks for a second OK. Revert over SSH with: <code>sudo /opt/jellyby/netapply.sh eth0 dhcp</code></p>
 
       <h2>Services</h2>
       <div id="status" class="status"></div>
