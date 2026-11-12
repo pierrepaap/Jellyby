@@ -1,13 +1,24 @@
 #!/bin/bash
-# Boot a Jellyby image in QEMU (raspi4b) and smoke-test it over SSH.
-# Run on an x86_64 Linux host with: sudo apt install qemu-system-arm qemu-utils sshpass
+# Boot a Jellyby image in QEMU and smoke-test it over SSH.
+# Run on an x86_64 Linux host with root: apt install qemu-system-arm qemu-utils sshpass
 #
 #   sudo bash scripts/test-image-qemu.sh [image.img] [ssh_port]
 #
-# Hard checks (fail = image is broken): boots to SSH, jellyby-web active and
-# serving the launcher UI + /api/config.
-# Soft checks (warn only, need real hardware): headless Chromium renders the
-# launcher, readsb/cec-kbd binaries present (no RTL-SDR / CEC adapter in QEMU).
+# How it boots: QEMU's raspi machines run the image's own VideoCore firmware from
+# the SD card (no -kernel/-dtb), which honours config.txt — that matters because
+# with a stock DTB the Pi 3's PL011 UART is routed to Bluetooth and the kernel
+# prints nothing under QEMU. We boot a resized *copy* (emulated SD needs a
+# power-of-2 size) with enable_uart=1 + dtoverlay=disable-bt + console=ttyAMA0
+# added to the copy's boot partition.
+#
+# Machine: raspi4b on QEMU >= 9, else raspi3b (Ubuntu 24.04 ships QEMU 8.x,
+# which has no raspi4b). usb-net on raspi3b logs benign "failed control
+# transaction" retries but does come up.
+#
+# Hard checks (fail = image broken): boots to SSH, jellyby-web active, launcher
+# UI + /api/config served, cec-kbd/readsb binaries present.
+# Soft checks (warn; need real hardware): headless Chromium render, readsb
+# service active (needs RTL-SDR dongle).
 set -euo pipefail
 
 IMG="${1:-jellyby-pi4.img}"
@@ -17,39 +28,33 @@ PORT="${2:-2222}"
 WORK="$(mktemp -d /tmp/jellyby-qemu.XXXXXX)"
 echo "workdir: $WORK"
 
-# pick the best raspi machine this QEMU build supports: raspi4b needs QEMU >= 9.x;
-# the QEMU 8.x shipped by Ubuntu 24.04 only has raspi3b, which boots the same
-# arm64 kernel8.img with the Pi 3 DTB
 MACHINES=$(qemu-system-aarch64 -machine help 2>/dev/null || true)
 if echo "$MACHINES" | grep -qw raspi4b; then
-  MACHINE=raspi4b; DTB=bcm2711-rpi-4-b.dtb; MEM=4096; CPU=cortex-a72
+  MACHINE=raspi4b; MEM=4096
 elif echo "$MACHINES" | grep -qw raspi3b; then
-  MACHINE=raspi3b; DTB=bcm2710-rpi-3-b-plus.dtb; MEM=1024; CPU=cortex-a53
+  MACHINE=raspi3b; MEM=1024
 else
-  echo "FAIL: this qemu-system-aarch64 has no raspi machine (need raspi4b or raspi3b)"
+  echo "FAIL: qemu-system-aarch64 has no raspi machine (need raspi4b or raspi3b; QEMU >= 8)"
   exit 1
 fi
-echo "using machine: $MACHINE (dtb $DTB, ${MEM}M)"
+echo "using machine: $MACHINE (${MEM}M)"
 
-# QEMU's emulated SD card requires a power-of-2 image size; pishrink output is not.
-# Boot a resized copy so the release artifact itself stays untouched.
+# QEMU's emulated SD card requires a power-of-2 image size; pishrink output is
+# not. Boot a resized copy so the release artifact stays untouched.
 cp --reflink=auto "$IMG" "$WORK/test.img"
 qemu-img resize "$WORK/test.img" 8G
-IMG="$WORK/test.img"
 
-# extract kernel + dtb from the image's boot partition
-LOOP=$(sudo losetup -fP --show "$IMG")
+# make the copy's firmware put the console on the PL011 UART (ttyAMA0)
+LOOP=$(sudo losetup -fP --show "$WORK/test.img")
 sudo mkdir -p /mnt/qb-boot
 sudo mount "${LOOP}p1" /mnt/qb-boot
-sudo cp /mnt/qb-boot/kernel8.img "$WORK/"
-sudo cp "/mnt/qb-boot/$DTB" "$WORK/" 2>/dev/null || sudo cp /mnt/qb-boot/bcm2711-rpi-4-b.dtb "$WORK/$DTB"
+printf 'enable_uart=1\ndtoverlay=disable-bt\n' | sudo tee -a /mnt/qb-boot/config.txt
+sudo sed -i 's|$| console=ttyAMA0,115200 earlyprintk loglevel=8|' /mnt/qb-boot/cmdline.txt
 sudo umount /mnt/qb-boot
 sudo losetup -d "$LOOP"
 
-qemu-system-aarch64 -M "$MACHINE" -cpu "$CPU" -smp 4 -m "$MEM" \
-  -kernel "$WORK/kernel8.img" -dtb "$WORK/$DTB" \
-  -append "rw root=/dev/mmcblk0p2 rootfstype=ext4 rootwait console=ttyAMA0 dwc_otg.lpm_enable=0" \
-  -drive file="$IMG",format=raw,if=sd \
+qemu-system-aarch64 -M "$MACHINE" -smp 4 -m "$MEM" \
+  -drive "file=$WORK/test.img,format=raw,if=sd" \
   -netdev "user,id=n0,hostfwd=tcp::${PORT}-:22" -device usb-net,netdev=n0 \
   -display none -serial "file:$WORK/console.log" &
 QPID=$!
@@ -57,17 +62,21 @@ trap 'kill "$QPID" 2>/dev/null || true' EXIT
 
 SSH="sshpass -p jellyby ssh -p $PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 pi@127.0.0.1"
 
-echo "waiting for SSH on port $PORT (first boot can take several minutes under TCG)..."
+echo "waiting for SSH on port $PORT (first boot under TCG can take a while)..."
 ok=""
 i=0
-while [ "$i" -lt 90 ]; do
+while [ "$i" -lt 120 ]; do
   i=$((i + 1))
   if $SSH true 2>/dev/null; then ok=1; break; fi
+  if grep -qi "kernel panic" "$WORK/console.log" 2>/dev/null; then
+    echo "FAIL: kernel panic in console log"
+    break
+  fi
   sleep 10
 done
 if [ -z "$ok" ]; then
-  echo "FAIL: no SSH after 15 min; console tail:"
-  tail -60 "$WORK/console.log" || true
+  echo "FAIL: no SSH after 20 min; console tail:"
+  tail -60 "$WORK/console.log" 2>/dev/null || echo "(console log empty)"
   exit 1
 fi
 echo "PASS: booted and SSH reachable"
@@ -103,7 +112,7 @@ warn  "readsb service active (needs RTL-SDR dongle)" "systemctl is-active --quie
 
 if [ "$fail" -ne 0 ]; then
   echo "SMOKE TEST FAILED; console tail:"
-  tail -60 "$WORK/console.log" || true
+  tail -60 "$WORK/console.log" 2>/dev/null || true
   exit 1
 fi
 echo "SMOKE TEST OK: $IMG boots and serves the launcher (console log: $WORK/console.log)"
