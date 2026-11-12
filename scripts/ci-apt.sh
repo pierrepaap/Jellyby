@@ -21,7 +21,10 @@ if [ "$updated" -ne 1 ]; then
 fi
 
 for i in 1 2 3 4 5; do
-  if sudo apt-get install -y "${APTOPTS[@]}" --fix-missing "$@"; then exit 0; fi
+  # no --fix-missing on purpose: a partially fetched package set must count as
+  # failure so the retry loop re-runs (v0.4.3: --fix-missing returned 0 while
+  # qemu-user-static was skipped -> qemu-aarch64-static missing later)
+  if sudo apt-get install -y "${APTOPTS[@]}" "$@"; then exit 0; fi
   echo "apt-get install attempt $i failed; retrying in 15s" >&2
   sleep 15
 done

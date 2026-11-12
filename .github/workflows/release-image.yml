@@ -29,6 +29,7 @@ jobs:
       - name: Install build tools
         run: |
           sudo bash scripts/ci-apt.sh qemu-user-static binfmt-support parted e2fsprogs xz-utils curl openssl cloud-guest-utils
+          test -x /usr/bin/qemu-aarch64-static   # guard: apt must not have skipped it
 
       - name: Download Raspberry Pi OS Lite (64-bit, latest)
         run: |
@@ -92,6 +93,7 @@ jobs:
       - name: Smoke-test image in QEMU (raspi4b or raspi3b, auto-detected) before publishing
         run: |
           sudo bash scripts/ci-apt.sh qemu-system-arm qemu-utils sshpass
+          command -v qemu-system-aarch64 >/dev/null && command -v sshpass >/dev/null
           sudo bash scripts/test-image-qemu.sh jellyby-pi4.img 2222
 
       - name: Package PINN repository assets (os_list_v3.json + partition tarballs)
