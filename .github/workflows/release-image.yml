@@ -91,6 +91,11 @@ jobs:
           xz -T0 -9 -k jellyby-pi4.img
           ls -lh jellyby-pi4.img.xz
 
+      - name: Free disk space (the smoke test copies the image and resizes the copy to 8G)
+        run: |
+          rm -f base.img base.img.xz pishrink.sh
+          df -h /
+
       - name: Smoke-test image in QEMU (raspi4b or raspi3b, auto-detected) before publishing
         run: |
           sudo bash scripts/ci-apt.sh qemu-system-arm qemu-utils sshpass
