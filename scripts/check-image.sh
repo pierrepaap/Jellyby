@@ -75,8 +75,8 @@ for s in jellyby-web jellyby-x jellyby-kiosk cec-kbd readsb; do
 done
 check "ssh service enabled" sudo test -e "$MNT/etc/systemd/system/multi-user.target.wants/ssh.service"
 
-check "media user in video group" sudo awk -F: '$1=="video"{exit !($4 ~ /(^|,)media(,|$)/)}' "$MNT/etc/group"
-check "media user in audio group" sudo awk -F: '$1=="audio"{exit !($4 ~ /(^|,)media(,|$)/)}' "$MNT/etc/group"
+check "media user in video group" sudo grep -Eq "^video:[^:]*:[^:]*:([^,]*,)?media(,.*)?$" "$MNT/etc/group"
+check "media user in audio group" sudo grep -Eq "^audio:[^:]*:[^:]*:([^,]*,)?media(,.*)?$" "$MNT/etc/group"
 check "players.json is root:media 0640" test "$(sudo stat -c '%U %G %a' "$MNT/etc/jellyby/players.json")" = "root media 640"
 check "sudoers syntax valid" sudo visudo -cf "$MNT/etc/sudoers.d/jellyby"
 check "apps.json is valid JSON" sudo python3 -m json.tool "$MNT/etc/jellyby/apps.json"
