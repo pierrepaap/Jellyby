@@ -101,7 +101,8 @@ jobs:
 
       - name: Package PINN repository assets (os_list_v3.json + partition tarballs)
         run: |
-          mkdir -p pinn-out /mnt/pb /mnt/pr
+          mkdir -p pinn-out
+          sudo mkdir -p /mnt/pb /mnt/pr
           LOOP2=$(sudo losetup -fP --show jellyby-pi4.img)
           sudo mount "${LOOP2}p1" /mnt/pb
           sudo mount "${LOOP2}p2" /mnt/pr
