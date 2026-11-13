@@ -71,13 +71,18 @@ for f in \
 done
 
 for s in jellyby-web jellyby-x jellyby-kiosk cec-kbd readsb; do
-  check "service enabled: $s" sudo test -e "$MNT/etc/systemd/system/multi-user.target.wants/$s.service"
+  check "service enabled: $s" sudo test -L "$MNT/etc/systemd/system/multi-user.target.wants/$s.service"
 done
-check "ssh service enabled" sudo test -e "$MNT/etc/systemd/system/multi-user.target.wants/ssh.service"
+check "ssh service enabled" sudo test -L "$MNT/etc/systemd/system/multi-user.target.wants/ssh.service"
 
 check "media user in video group" sudo grep -Eq "^video:[^:]*:[^:]*:([^,]*,)?media(,.*)?$" "$MNT/etc/group"
 check "media user in audio group" sudo grep -Eq "^audio:[^:]*:[^:]*:([^,]*,)?media(,.*)?$" "$MNT/etc/group"
-check "players.json is root:media 0640" test "$(sudo stat -c '%U %G %a' "$MNT/etc/jellyby/players.json")" = "root media 640"
+# stat -c %U/%G would resolve names against the HOST passwd, not the image's,
+# so compare numeric uid/gid taken from the image's own passwd/group.
+MEDIA_UID=$(sudo sed -n 's/^media:[^:]*:\([0-9]*\):.*/\1/p' "$MNT/etc/passwd")
+MEDIA_GID=$(sudo sed -n 's/^media:[^:]*:\([0-9]*\):.*/\1/p' "$MNT/etc/group")
+check "media user exists" test -n "$MEDIA_UID"
+check "players.json is root:media 0640" test "$(sudo stat -c '%u %g %a' "$MNT/etc/jellyby/players.json")" = "0 $MEDIA_GID 640"
 check "sudoers syntax valid" sudo visudo -cf "$MNT/etc/sudoers.d/jellyby"
 check "apps.json is valid JSON" sudo python3 -m json.tool "$MNT/etc/jellyby/apps.json"
 check "players.json is valid JSON" sudo python3 -m json.tool "$MNT/etc/jellyby/players.json"
