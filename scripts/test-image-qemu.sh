@@ -1,19 +1,22 @@
 #!/bin/bash
 # Boot a Jellyby image in QEMU and smoke-test it over SSH.
-# Run on an x86_64 Linux host with root: apt install qemu-system-arm qemu-utils sshpass
+# Run on a Linux host with root: apt install qemu-system-arm qemu-utils sshpass device-tree-compiler
 #
 #   sudo bash scripts/test-image-qemu.sh [image.img] [ssh_port]
 #
-# How it boots: QEMU's raspi machines run the image's own VideoCore firmware from
-# the SD card (no -kernel/-dtb), which honours config.txt — that matters because
-# with a stock DTB the Pi 3's PL011 UART is routed to Bluetooth and the kernel
-# prints nothing under QEMU. We boot a resized *copy* (emulated SD needs a
-# power-of-2 size) with enable_uart=1 + dtoverlay=disable-bt + console=ttyAMA0
-# added to the copy's boot partition.
+# How it boots: QEMU's raspi machines are bare SoC emulators — the image's
+# VideoCore firmware never runs and config.txt is ignored. The kernel and DTB
+# are therefore loaded explicitly (-kernel/-dtb) from the image's own boot
+# partition, and the image's own disable-bt overlay is applied to the DTB with
+# fdtoverlay so console=ttyAMA0 lands on the emulated PL011 (on the stock DTB
+# the PL011 belongs to Bluetooth and the kernel prints nothing).
 #
-# Machine: raspi4b on QEMU >= 9, else raspi3b (Ubuntu 24.04 ships QEMU 8.x,
-# which has no raspi4b). usb-net on raspi3b logs benign "failed control
-# transaction" retries but does come up.
+# Machine: raspi3b preferred (QEMU's raspi4b has no usable network: the Pi 4
+# USB controller sits on PCIe, which QEMU does not emulate). raspi3b needs a
+# resized power-of-2 *copy* of the image as the emulated SD card. usb-net on
+# raspi3b logs benign "failed control transaction" retries but does come up.
+#
+# The serial console is copied to ./qemu-console.log on exit (CI attaches it).
 #
 # Hard checks (fail = image broken): boots to SSH, jellyby-web active, launcher
 # UI + /api/config served, cec-kbd/readsb binaries present.
@@ -24,17 +27,18 @@ set -euo pipefail
 IMG="${1:-jellyby-pi4.img}"
 PORT="${2:-2222}"
 [ -f "$IMG" ] || { echo "image not found: $IMG"; exit 1; }
+command -v fdtoverlay >/dev/null || { echo "FAIL: fdtoverlay not found (apt install device-tree-compiler)"; exit 1; }
 
 WORK="$(mktemp -d /tmp/jellyby-qemu.XXXXXX)"
 echo "workdir: $WORK"
 
 MACHINES=$(qemu-system-aarch64 -machine help 2>/dev/null || true)
-if echo "$MACHINES" | grep -qw raspi4b; then
-  MACHINE=raspi4b; MEM=4096
-elif echo "$MACHINES" | grep -qw raspi3b; then
-  MACHINE=raspi3b; MEM=1024
+if echo "$MACHINES" | grep -qw raspi3b; then
+  MACHINE=raspi3b; MEM=1024; EARLYCON="earlycon=pl011,mmio32,0x3f201000"
+elif echo "$MACHINES" | grep -qw raspi4b; then
+  MACHINE=raspi4b; MEM=2048; EARLYCON="earlycon=pl011,mmio32,0xfe201000"
 else
-  echo "FAIL: qemu-system-aarch64 has no raspi machine (need raspi4b or raspi3b; QEMU >= 8)"
+  echo "FAIL: qemu-system-aarch64 has no raspi machine (need raspi3b or raspi4b; QEMU >= 8)"
   exit 1
 fi
 echo "using machine: $MACHINE (${MEM}M)"
@@ -42,23 +46,40 @@ echo "using machine: $MACHINE (${MEM}M)"
 # QEMU's emulated SD card requires a power-of-2 image size; pishrink output is
 # not. Boot a resized copy so the release artifact stays untouched.
 cp --reflink=auto "$IMG" "$WORK/test.img"
-qemu-img resize "$WORK/test.img" 8G
+qemu-img resize -f raw "$WORK/test.img" 8G
 
-# make the copy's firmware put the console on the PL011 UART (ttyAMA0)
+# Pull kernel, DTB and the disable-bt overlay out of the image's boot partition
+# (QEMU never runs the firmware that would normally apply them).
 LOOP=$(sudo losetup -fP --show "$WORK/test.img")
 sudo mkdir -p /mnt/qb-boot
 sudo mount "${LOOP}p1" /mnt/qb-boot
-printf 'enable_uart=1\ndtoverlay=disable-bt\n' | sudo tee -a /mnt/qb-boot/config.txt
-sudo sed -i 's|$| console=ttyAMA0,115200 earlyprintk loglevel=8|' /mnt/qb-boot/cmdline.txt
+sudo cp /mnt/qb-boot/kernel8.img "$WORK/kernel8.img"
+if [ "$MACHINE" = raspi4b ]; then
+  sudo cp /mnt/qb-boot/bcm2711-rpi-4-b.dtb "$WORK/base.dtb"
+else
+  sudo cp /mnt/qb-boot/bcm2710-rpi-3-b.dtb "$WORK/base.dtb"
+fi
+if sudo test -f /mnt/qb-boot/overlays/disable-bt-overlay.dtbo; then
+  sudo cp /mnt/qb-boot/overlays/disable-bt-overlay.dtbo "$WORK/disable-bt.dtbo"
+fi
+CMDLINE="$(sudo cat /mnt/qb-boot/cmdline.txt)"
 sudo umount /mnt/qb-boot
 sudo losetup -d "$LOOP"
 
+if [ -f "$WORK/disable-bt.dtbo" ]; then
+  fdtoverlay -i "$WORK/base.dtb" -o "$WORK/patched.dtb" "$WORK/disable-bt.dtbo"
+else
+  cp "$WORK/base.dtb" "$WORK/patched.dtb"
+fi
+
 qemu-system-aarch64 -M "$MACHINE" -smp 4 -m "$MEM" \
+  -kernel "$WORK/kernel8.img" -dtb "$WORK/patched.dtb" \
+  -append "$CMDLINE console=ttyAMA0,115200 $EARLYCON loglevel=8" \
   -drive "file=$WORK/test.img,format=raw,if=sd" \
   -netdev "user,id=n0,hostfwd=tcp::${PORT}-:22" -device usb-net,netdev=n0 \
   -display none -serial "file:$WORK/console.log" &
 QPID=$!
-trap 'kill "$QPID" 2>/dev/null || true' EXIT
+trap 'cp "$WORK/console.log" ./qemu-console.log 2>/dev/null || true; kill "$QPID" 2>/dev/null || true' EXIT
 
 SSH="sshpass -p jellyby ssh -p $PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 pi@127.0.0.1"
 

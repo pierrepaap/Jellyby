@@ -15,7 +15,7 @@ jobs:
 
       - name: shellcheck
         run: |
-          shellcheck setup.sh scripts/ci-apt.sh scripts/serve-local.sh scripts/test-image-qemu.sh files/usr/local/bin/readsb-wrapper.sh files/opt/jellyby/kiosk.sh files/opt/jellyby/play.sh files/opt/jellyby/netapply.sh pinn/partition_setup.sh
+          shellcheck setup.sh scripts/ci-apt.sh scripts/check-image.sh scripts/serve-local.sh scripts/test-image-qemu.sh files/usr/local/bin/readsb-wrapper.sh files/opt/jellyby/kiosk.sh files/opt/jellyby/play.sh files/opt/jellyby/netapply.sh pinn/partition_setup.sh
 
       - name: cec-kbd syntax check against libcec headers
         run: |
