@@ -31,7 +31,8 @@ Everything runs as systemd services and is manageable over **SSH**.
 | Piece | Service | Notes |
 |---|---|---|
 | Launcher UI | `jellyby-web` | `python3 /opt/jellyby/server.py`, localhost only (127.0.0.1:8901) |
-| Kiosk browser | `jellyby-kiosk` | Chromium `--kiosk` on `jellyby-x` (Xorg) |
+| Kiosk browser | `jellyby-kiosk` | Chromium `--kiosk` on `jellyby-x` (Xorg); launcher UI + `browser`-type tiles |
+| Native player | on-demand | system `mpv` fullscreen on :0 with Pi 4 rpivid HEVC hwdec (`/opt/jellyby/play.sh`) |
 | CEC remote → keyboard | `cec-kbd` | libcec daemon injecting keys via uinput; keymap in `/etc/jellyby/cec-keymap.conf` |
 | ADS-B receiver | `readsb` | config in `/etc/default/readsb` |
 | SSH | `ssh` | enabled |
@@ -83,40 +84,34 @@ exactly like the remote:
 ./scripts/serve-local.sh        # then open http://127.0.0.1:8901
 ```
 
-## Test in a QEMU Raspberry Pi 4 emulator
+## Test in a QEMU Raspberry Pi emulator (manual; not run in CI)
 
-QEMU boots Pi OS Lite (`-M raspi4b`) — good for validating provisioning,
-services, the readsb build and the HTTP API — but it has **no GPU (V3D) and no
-HDMI-CEC**, so the kiosk UI and remote cannot be tested there:
+QEMU's raspi machines are bare SoC emulators: the image's VideoCore firmware
+never runs, `config.txt` is ignored, and the kernel must be loaded explicitly
+with `-kernel`/`-dtb` taken from the image's boot partition. Emulation caveats:
 
-```bash
-# easiest: let the script do it (boots via the image's own firmware, raspi4b on
-# QEMU >= 9 else raspi3b, console on ttyAMA0, SSH on host port 2222):
-sudo bash scripts/test-image-qemu.sh pi-os-lite.img 2222
-# manual equivalent (firmware boot from the SD image; enable_uart=1 +
-# dtoverlay=disable-bt in config.txt are required or the Pi 3's UART goes to
-# Bluetooth and QEMU shows no console):
-qemu-system-aarch64 -M raspi3b -smp 4 -m 1024 \
-  -drive file=pi-os-lite.img,format=raw,if=sd \
-  -netdev user,id=n0,hostfwd=tcp::2222-:22 -device usb-net,netdev=n0 \
-  -display none -serial file:console.log
-# ssh -p 2222 pi@127.0.0.1  →  sudo ./setup.sh, systemctl status, curl 127.0.0.1:8901/api/config
-```
+- use `-M raspi3b` — QEMU's `raspi4b` has **no usable network** (the Pi 4 USB
+  controller sits on PCIe, which QEMU does not emulate)
+- on the stock Pi 3 DTB the PL011 UART belongs to Bluetooth; apply the image's
+  own `disable-bt` overlay to the DTB (`fdtoverlay`) or `console=ttyAMA0`
+  prints nothing
+- no GPU (V3D) and no HDMI-CEC: the kiosk UI and remote cannot be tested there
 
-### Smoke-test a built image in QEMU before flashing
-
-`scripts/test-image-qemu.sh` boots the **actual release image** in QEMU, waits
-for SSH, and runs automated checks — hard-fail if the image doesn't boot or the
-launcher web app isn't served; soft warnings for the parts that need real
-hardware (headless-Chromium render of the UI, RTL-SDR/CEC presence). The
-release pipeline runs this automatically **before** attaching assets to a
-release, so a published image has already booted once in CI:
+`scripts/test-image-qemu.sh` does all of this for you (boots a resized copy,
+extracts kernel + DTB, applies the overlay, waits for SSH, runs the checks,
+saves the serial console to `qemu-console.log`):
 
 ```bash
-sudo apt install qemu-system-arm qemu-utils sshpass
+sudo apt install qemu-system-arm qemu-utils sshpass device-tree-compiler
 xz -d jellyby-pi4.img.xz
 sudo bash scripts/test-image-qemu.sh jellyby-pi4.img 2222   # logs in as pi/jellyby
+# then: ssh -p 2222 pi@127.0.0.1, systemctl status, curl 127.0.0.1:8901/api/config
 ```
+
+The release pipeline does **not** boot the image in CI (emulated Pi boots are
+slow and flaky); it gates on `scripts/check-image.sh` instead — hard no-boot
+checks on the mounted image (boot config, installed binaries, enabled
+services, permissions, JSON configs). The first real boot happens on your Pi.
 
 Cannot be emulated: real HDMI-CEC remote interaction and GPU video playback —
 those still need one boot on the Pi.
@@ -143,6 +138,52 @@ SD card via [PINN](https://github.com/procount/pinn):
 
 The PINN assets live flat in each release, e.g.
 `https://github.com/pierrepaap/Jellyby/releases/latest/download/os_list_v3.json`.
+
+## Playback: native MPV (primary) vs browser (fallback)
+
+No browser on a Pi 4 can hardware-decode HEVC/H.265 — only MPV/ffmpeg via the
+kernel rpivid V4L2 stateless decoder (needs `dtoverlay=vc4-kms-v3d` in
+`config.txt`, which `setup.sh` ensures idempotently, plus `gpu_mem=256`).
+So each app is a **typed** entry in `/etc/jellyby/apps.json`:
+
+```json
+{ "apps": [
+  { "name": "Jellyfin", "type": "mpv",     "server": "jellyfin", "url": "http://jellyfin.local:8096", "item": "" },
+  { "name": "Emby",     "type": "mpv",     "server": "emby",     "url": "http://emby.local:8096",  "item": "" },
+  { "name": "Plex",     "type": "browser", "server": "plex",     "url": "http://plex.local:32400/web" }
+] }
+```
+
+- `type: "mpv"` (default for Jellyfin/Emby): selecting the tile calls
+  `POST /api/launch`, which runs `/opt/jellyby/play.sh <name>` — it resolves a
+  direct-play stream URL from the server's REST API (stdlib
+  `resolve_stream.py`: `AuthenticateByName` → item (given `item` or latest
+  Movie/Episode) → `/Videos/{id}/stream?static=true`) and launches **system
+  mpv** fullscreen on `DISPLAY :0` with `/opt/jellyby/mpv/mpv.conf`
+  (`hwdec=auto-safe` → rpivid v4l2-request, `vo=gpu`, fullscreen). The remote's
+  exit key (Ctrl+W) is mapped to `quit` in `mpv/input.conf`, so exiting mpv
+  returns to the launcher — same UX as closing a browser tab.
+  Media-server credentials live in `/etc/jellyby/players.json` (root:media
+  0640, keyed by app name; edit over SSH).
+- `type: "browser"`: opens the URL in a Chromium tab as before (launcher UI
+  itself always runs in Chromium). If MPV can't resolve a stream (server down,
+  bad credentials), `/api/launch` returns `mode: "browser"` and the UI opens
+  the browser tab — playback degrades gracefully instead of failing.
+- Legacy `{name, url}` entries still load (normalized to `type: "browser"`).
+- Optional polished front-ends (Jellyfin Media Player flatpak, Emby Theater
+  .deb) install only with `JELLYBY_THEATER=1 sudo ./setup.sh`; system mpv
+  remains the decode path regardless.
+
+## Network settings (in the launcher)
+
+Settings → Network shows live NetworkManager state (`GET /api/network`) and
+lets you switch an interface between **DHCP** and **static** (address/CIDR,
+gateway, DNS list) with the remote + on-screen keyboard. `POST /api/network`
+validates strictly (IPv4/CIDR, gateway-in-subnet, ≤3 IPv4 DNS, existing
+interface, `confirm: true`) and applies via `sudo /opt/jellyby/netapply.sh`,
+which is restricted to specific `nmcli` subcommands in `/etc/sudoers.d/jellyby`.
+**Escape hatch if a bad static config locks you out of SSH:**
+`sudo /opt/jellyby/netapply.sh eth0 dhcp`.
 
 ## Using the kiosk
 
@@ -195,7 +236,8 @@ Plug the RTL-SDR dongle into the Pi before (re)starting the service.
 
 | File | Purpose | Edit |
 |---|---|---|
-| `/etc/jellyby/apps.json` | launcher tiles (name + URL) | in the kiosk (on-screen keyboard) or SSH |
+| `/etc/jellyby/apps.json` | launcher tiles (typed: name/type/server/url/item) | in the kiosk (on-screen keyboard) or SSH |
+| `/etc/jellyby/players.json` | media-server credentials for MPV (root:media 0640) | SSH only |
 | `/etc/jellyby/cec-keymap.conf` | CEC button → key mapping | SSH |
 | `/etc/default/readsb` | readsb options + optional remote push target | SSH |
 
@@ -216,11 +258,27 @@ image and uploads the assets to that release. Lint still gates every PR/merge
 via `lint.yml`; image builds stay release-driven so each image maps to a
 versioned release.
 
+## What is verified where
+
+- **QEMU CI smoke test (hard checks)**: image boots, SSH up, launcher served,
+  `/api/config` valid, `mpv`/`cec-kbd`/`readsb`/`play.sh`/`netapply.sh`
+  installed, `config.txt` has `vc4-kms-v3d` + `gpu_mem=256`, `media` in the
+  `video` group.
+- **Soft warnings only (need real hardware)**: headless-Chromium render, readsb
+  with an RTL-SDR dongle.
+- **Real Pi 4 only**: HEVC 10-bit hwdec via rpivid in mpv, HDMI-CEC remote
+  pairing, actual playback of your library. Verify with
+  `mpv --hwdec=auto-safe --msg-level=all=v` over SSH, or
+  `v4l2-ctl -d /dev/video10 --list-formats`.
+
 ## Security notes
 
 - The prebuilt image ships with **pi / jellyby** — change it right after first
   boot, or use SSH keys (`ssh-copy-id`). In Imager you can also set your own
   user/password at flash time.
+- The kiosk Chromium runs with its **sandbox enabled** (no `--no-sandbox`); it needs
+  unprivileged user namespaces (`kernel.unprivileged_userns_clone=1`, default on Pi OS
+  Bookworm+) because the launcher loads remote web UIs.
 - The launcher API binds to **127.0.0.1 only**; the only privileged actions
   allowed for the kiosk user are `systemctl reboot/poweroff/restart readsb`
   (see `/etc/sudoers.d/jellyby`).
@@ -237,7 +295,7 @@ imager/jellyby.json             Raspberry Pi Imager custom-repo list (reference 
 files/etc/systemd/system/       service units
 files/etc/jellyby/              apps.json (default tiles) + cec-keymap.conf
 files/etc/default/readsb        readsb options
-files/opt/jellyby/              server.py, cec_kbd.c, kiosk.sh, www/ (launcher UI)
+files/opt/jellyby/              server.py, resolve_stream.py, play.sh, netapply.sh, cec_kbd.c, kiosk.sh, mpv/ (hwdec config), www/ (launcher UI)
 files/usr/local/bin/            readsb-wrapper.sh
 docs/remote-tar1090/            docker-compose for the remote map machine
 .github/workflows/lint.yml      CI: shellcheck, gcc syntax check, py/node/json checks

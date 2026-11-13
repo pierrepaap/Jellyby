@@ -52,13 +52,11 @@ jobs:
           sudo mount "${LOOP}p1" /mnt/jb-boot
           sudo mount "${LOOP}p2" /mnt/jb-root
 
-      - name: First-boot settings on the boot partition (SSH, default user, splash)
+      - name: First-boot settings on the boot partition (SSH, default user)
         run: |
           sudo touch /mnt/jb-boot/ssh
           echo "pi:$(openssl passwd -6 jellyby)" | sudo tee /mnt/jb-boot/userconf.txt
-          if ! sudo grep -q "^disable_splash=1" /mnt/jb-boot/config.txt; then
-            echo "disable_splash=1" | sudo tee -a /mnt/jb-boot/config.txt
-          fi
+          # config.txt itself (KMS/gpu_mem/splash) is written by setup.sh via the bind mount below
 
       - name: Run setup.sh in chroot (ARM64 under qemu-user-static)
         run: |
@@ -67,10 +65,13 @@ jobs:
           sudo mount --bind /dev /mnt/jb-root/dev
           sudo mount --bind /proc /mnt/jb-root/proc
           sudo mount --bind /sys /mnt/jb-root/sys
+          sudo mkdir -p /mnt/jb-root/boot/firmware
+          sudo mount --bind /mnt/jb-boot /mnt/jb-root/boot/firmware
           sudo mkdir -p /mnt/jb-root/root/Jellyby
           git archive HEAD | sudo tar -x -C /mnt/jb-root/root/Jellyby
           sudo chroot /mnt/jb-root /usr/bin/qemu-aarch64-static /bin/bash -c \
             "cd /root/Jellyby && JELLYBY_OFFLINE=1 ./setup.sh"
+          sudo umount /mnt/jb-root/boot/firmware
           sudo rm -rf /mnt/jb-root/root/Jellyby /mnt/jb-root/usr/bin/qemu-aarch64-static
           sudo sync
 
@@ -90,11 +91,13 @@ jobs:
           xz -T0 -9 -k jellyby-pi4.img
           ls -lh jellyby-pi4.img.xz
 
-      - name: Smoke-test image in QEMU (raspi4b or raspi3b, auto-detected) before publishing
+      - name: Free disk space (the PINN packaging below loop-mounts the image)
         run: |
-          sudo bash scripts/ci-apt.sh qemu-system-arm qemu-utils sshpass
-          command -v qemu-system-aarch64 >/dev/null && command -v sshpass >/dev/null
-          sudo bash scripts/test-image-qemu.sh jellyby-pi4.img 2222
+          rm -f base.img base.img.xz pishrink.sh
+          df -h /
+
+      - name: Hard image checks (no boot; these gate the release)
+        run: sudo bash scripts/check-image.sh jellyby-pi4.img
 
       - name: Package PINN repository assets (os_list_v3.json + partition tarballs)
         run: |

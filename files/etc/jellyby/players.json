@@ -1,0 +1,6 @@
+{
+  "players": {
+    "Jellyfin": { "username": "", "password": "", "item": "" },
+    "Emby": { "username": "", "password": "", "item": "" }
+  }
+}

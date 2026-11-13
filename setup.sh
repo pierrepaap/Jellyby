@@ -37,6 +37,7 @@ fi
 echo "==> Installing packages (browser: $CHROMIUM_PKG)"
 apt-get install -y \
   "$CHROMIUM_PKG" \
+  mpv \
   xserver-xorg xserver-xorg-input-libinput xserver-xorg-video-fbdev \
   openssh-server sudo \
   git make gcc pkg-config \
@@ -44,10 +45,23 @@ apt-get install -y \
   libusb-1.0-0-dev librtlsdr-dev libncurses-dev zlib1g-dev libzstd-dev \
   python3
 
+# Optional polished front-ends (secondary; system mpv stays the primary decode
+# path). Off by default to keep the image lean: JELLYBY_THEATER=1 sudo ./setup.sh
+if [[ "${JELLYBY_THEATER:-0}" == "1" ]]; then
+  echo "==> Installing optional theater front-ends (flatpak JMP + Emby Theater .deb)"
+  apt-get install -y flatpak
+  flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
+  flatpak install -y flathub dev.jellyfin.JellyfinMediaPlayer || echo "JMP flatpak install failed; mpv remains the player" >&2
+  curl -fL -o /tmp/emby-theater.deb https://github.com/MediaBrowser/Emby.Releases/releases/latest/download/emby-theater-arm64.deb \
+    && dpkg -i /tmp/emby-theater.deb || echo "Emby Theater .deb install failed; mpv remains the player" >&2
+fi
+
 echo "==> Creating kiosk user 'media'"
 if ! id media >/dev/null 2>&1; then
   useradd --create-home --shell /bin/bash media
 fi
+# mpv needs the GPU (renderD128) and the rpivid V4L2 decoder nodes (video group)
+usermod -aG video,audio media
 
 echo "==> Installing Jellyby files"
 install -d /etc/jellyby /opt/jellyby/www /usr/local/bin
@@ -55,9 +69,11 @@ install -d /etc/jellyby /opt/jellyby/www /usr/local/bin
 # Do not overwrite user-edited config on re-runs
 [[ -f /etc/jellyby/apps.json ]]      || install -m 644 "$FILES/etc/jellyby/apps.json" /etc/jellyby/apps.json
 [[ -f /etc/jellyby/cec-keymap.conf ]] || install -m 644 "$FILES/etc/jellyby/cec-keymap.conf" /etc/jellyby/cec-keymap.conf
+# players.json holds media-server credentials: root:media 0640, never overwritten
+[[ -f /etc/jellyby/players.json ]]   || install -m 640 -o root -g media "$FILES/etc/jellyby/players.json" /etc/jellyby/players.json
 
 cp -r "$FILES/opt/jellyby/." /opt/jellyby/
-chmod 755 /opt/jellyby/kiosk.sh /opt/jellyby/server.py
+chmod 755 /opt/jellyby/kiosk.sh /opt/jellyby/server.py /opt/jellyby/play.sh /opt/jellyby/resolve_stream.py /opt/jellyby/netapply.sh
 
 install -m 755 "$FILES/usr/local/bin/readsb-wrapper.sh" /usr/local/bin/readsb-wrapper
 install -m 644 "$FILES/etc/default/readsb" /etc/default/readsb
@@ -70,7 +86,8 @@ for unit in jellyby-web jellyby-x jellyby-kiosk cec-kbd readsb; do
 done
 
 # The launcher web app saves /etc/jellyby/apps.json as user 'media'
-chown -R media:media /etc/jellyby
+# (players.json keeps root:media 0640 — it contains credentials)
+chown media:media /etc/jellyby/apps.json /etc/jellyby/cec-keymap.conf 2>/dev/null || chown -R media:media /etc/jellyby
 
 echo "==> Compiling CEC keyboard daemon"
 # libcec.pc on Debian/Raspberry Pi OS declares "Requires: p8-platform" but does
@@ -90,14 +107,34 @@ if [[ ! -x /usr/local/bin/readsb ]]; then
   install -m 755 /opt/readsb-src/readsb /usr/local/bin/readsb
 fi
 
-if [[ "${JELLYBY_OFFLINE:-0}" != "1" ]]; then
-  echo "==> Setting hostname and disabling boot splash"
-  hostnamectl set-hostname jellyby 2>/dev/null || true
-  for cfg in /boot/firmware/config.txt /boot/config.txt; do
-    if [[ -f "$cfg" ]] && ! grep -q "^disable_splash=1" "$cfg"; then
-      echo "disable_splash=1" >> "$cfg"
+# Boot config (idempotent, also in chroot via JELLYBY_BOOT_DIR bind mount):
+# vc4-kms-v3d exposes the Pi 4 GPU + rpivid HEVC decoder to mpv and makes Xorg
+# modesetting GPU-accelerated; gpu_mem=256 for 4K decode headroom.
+ensure_boot_config() {
+  local cfg="$1"
+  [[ -f "$cfg" ]] || return 0
+  local line key
+  for line in "dtoverlay=vc4-kms-v3d" "gpu_mem=256" "max_framebuffers=2" "disable_splash=1"; do
+    key="${line%%=*}"
+    if ! grep -qE "^[[:space:]]*${key}=" "$cfg"; then
+      echo "$line" >> "$cfg"
     fi
   done
+}
+BOOT_DIR="${JELLYBY_BOOT_DIR:-}"
+if [[ -z "$BOOT_DIR" ]]; then
+  for d in /boot/firmware /boot; do
+    [[ -d "$d" ]] && BOOT_DIR="$d" && break
+  done
+fi
+if [[ -n "$BOOT_DIR" ]]; then
+  echo "==> Ensuring boot config in $BOOT_DIR/config.txt"
+  ensure_boot_config "$BOOT_DIR/config.txt"
+fi
+
+if [[ "${JELLYBY_OFFLINE:-0}" != "1" ]]; then
+  echo "==> Setting hostname"
+  hostnamectl set-hostname jellyby 2>/dev/null || true
 fi
 
 echo "==> Enabling services"
@@ -118,7 +155,11 @@ else
   echo "Jellyby setup complete."
   echo "  - Reboot now (sudo reboot) to enter the kiosk: the launcher appears on HDMI."
   echo "  - Navigate with your projector remote (HDMI-CEC). Menu key = settings."
-  echo "  - Add/edit your Emby / Jellyfin / Plex URLs in the on-screen settings."
+  echo "  - Add/edit your Emby / Jellyfin / Plex servers in the on-screen settings."
+  echo "    Jellyfin/Emby tiles play natively in MPV (Pi 4 HEVC hwdec); Plex/browser tiles open in Chromium."
+  echo "  - Media server credentials for MPV: /etc/jellyby/players.json (root:media 0640)."
+  echo "  - Network (static/DHCP): Settings in the launcher, or over SSH:"
+  echo "    sudo /opt/jellyby/netapply.sh eth0 dhcp   # revert escape hatch"
   echo "  - readsb: edit /etc/default/readsb over SSH, then 'sudo systemctl restart readsb'."
   echo "  - CEC keymap: /etc/jellyby/cec-keymap.conf, then 'sudo systemctl restart cec-kbd'."
 fi

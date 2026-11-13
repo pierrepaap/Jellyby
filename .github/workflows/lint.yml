@@ -15,7 +15,7 @@ jobs:
 
       - name: shellcheck
         run: |
-          shellcheck setup.sh scripts/ci-apt.sh scripts/serve-local.sh scripts/test-image-qemu.sh files/usr/local/bin/readsb-wrapper.sh files/opt/jellyby/kiosk.sh pinn/partition_setup.sh
+          shellcheck setup.sh scripts/ci-apt.sh scripts/check-image.sh scripts/serve-local.sh scripts/test-image-qemu.sh files/usr/local/bin/readsb-wrapper.sh files/opt/jellyby/kiosk.sh files/opt/jellyby/play.sh files/opt/jellyby/netapply.sh pinn/partition_setup.sh
 
       - name: cec-kbd syntax check against libcec headers
         run: |
@@ -27,6 +27,7 @@ jobs:
       - name: python syntax check
         run: |
           python3 -m py_compile files/opt/jellyby/server.py
+          python3 -m py_compile files/opt/jellyby/resolve_stream.py
           python3 -m py_compile scripts/gen-pinn.py
 
       - name: Set up Node (pinned)
@@ -40,4 +41,5 @@ jobs:
       - name: json check
         run: |
           python3 -m json.tool files/etc/jellyby/apps.json > /dev/null
+          python3 -m json.tool files/etc/jellyby/players.json > /dev/null
           python3 -m json.tool imager/jellyby.json > /dev/null

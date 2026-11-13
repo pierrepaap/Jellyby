@@ -1,2 +1,5 @@
 # Allow the kiosk user to reboot / power off / restart readsb from the launcher UI.
 media ALL=(root) NOPASSWD: /usr/bin/systemctl reboot, /usr/bin/systemctl poweroff, /usr/bin/systemctl restart readsb
+# Network settings from the launcher UI: only these specific nmcli subcommands,
+# as used by /opt/jellyby/netapply.sh. No blanket root.
+media ALL=(root) NOPASSWD: /usr/bin/nmcli connection add *, /usr/bin/nmcli connection modify *, /usr/bin/nmcli connection up *, /usr/bin/nmcli connection show *, /usr/bin/nmcli device reapply *
