@@ -91,32 +91,13 @@ jobs:
           xz -T0 -9 -k jellyby-pi4.img
           ls -lh jellyby-pi4.img.xz
 
-      - name: Free disk space (the smoke test copies the image and resizes the copy to 8G)
+      - name: Free disk space (the PINN packaging below loop-mounts the image)
         run: |
           rm -f base.img base.img.xz pishrink.sh
           df -h /
 
       - name: Hard image checks (no boot; these gate the release)
         run: sudo bash scripts/check-image.sh jellyby-pi4.img
-
-      - name: Smoke-test boot in QEMU (best-effort, non-fatal; boot is validated on hardware)
-        run: |
-          sudo bash scripts/ci-apt.sh qemu-system-arm qemu-utils sshpass device-tree-compiler
-          command -v qemu-system-aarch64 >/dev/null && command -v sshpass >/dev/null
-          if sudo bash scripts/test-image-qemu.sh jellyby-pi4.img 2222; then
-            echo "QEMU boot smoke passed"
-          else
-            echo "::warning::QEMU boot smoke did not pass (emulated Pi boot is best-effort; raspi4b has no emulated networking). Validate the boot on real hardware."
-          fi
-
-      - name: Upload QEMU console log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: qemu-console-log
-          path: qemu-console.log
-          if-no-files-found: ignore
-          retention-days: 14
 
       - name: Package PINN repository assets (os_list_v3.json + partition tarballs)
         run: |

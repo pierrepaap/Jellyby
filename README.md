@@ -84,40 +84,34 @@ exactly like the remote:
 ./scripts/serve-local.sh        # then open http://127.0.0.1:8901
 ```
 
-## Test in a QEMU Raspberry Pi 4 emulator
+## Test in a QEMU Raspberry Pi emulator (manual; not run in CI)
 
-QEMU boots Pi OS Lite (`-M raspi4b`) — good for validating provisioning,
-services, the readsb build and the HTTP API — but it has **no GPU (V3D) and no
-HDMI-CEC**, so the kiosk UI and remote cannot be tested there:
+QEMU's raspi machines are bare SoC emulators: the image's VideoCore firmware
+never runs, `config.txt` is ignored, and the kernel must be loaded explicitly
+with `-kernel`/`-dtb` taken from the image's boot partition. Emulation caveats:
 
-```bash
-# easiest: let the script do it (boots via the image's own firmware, raspi4b on
-# QEMU >= 9 else raspi3b, console on ttyAMA0, SSH on host port 2222):
-sudo bash scripts/test-image-qemu.sh pi-os-lite.img 2222
-# manual equivalent (firmware boot from the SD image; enable_uart=1 +
-# dtoverlay=disable-bt in config.txt are required or the Pi 3's UART goes to
-# Bluetooth and QEMU shows no console):
-qemu-system-aarch64 -M raspi3b -smp 4 -m 1024 \
-  -drive file=pi-os-lite.img,format=raw,if=sd \
-  -netdev user,id=n0,hostfwd=tcp::2222-:22 -device usb-net,netdev=n0 \
-  -display none -serial file:console.log
-# ssh -p 2222 pi@127.0.0.1  →  sudo ./setup.sh, systemctl status, curl 127.0.0.1:8901/api/config
-```
+- use `-M raspi3b` — QEMU's `raspi4b` has **no usable network** (the Pi 4 USB
+  controller sits on PCIe, which QEMU does not emulate)
+- on the stock Pi 3 DTB the PL011 UART belongs to Bluetooth; apply the image's
+  own `disable-bt` overlay to the DTB (`fdtoverlay`) or `console=ttyAMA0`
+  prints nothing
+- no GPU (V3D) and no HDMI-CEC: the kiosk UI and remote cannot be tested there
 
-### Smoke-test a built image in QEMU before flashing
-
-`scripts/test-image-qemu.sh` boots the **actual release image** in QEMU, waits
-for SSH, and runs automated checks — hard-fail if the image doesn't boot or the
-launcher web app isn't served; soft warnings for the parts that need real
-hardware (headless-Chromium render of the UI, RTL-SDR/CEC presence). The
-release pipeline runs this automatically **before** attaching assets to a
-release, so a published image has already booted once in CI:
+`scripts/test-image-qemu.sh` does all of this for you (boots a resized copy,
+extracts kernel + DTB, applies the overlay, waits for SSH, runs the checks,
+saves the serial console to `qemu-console.log`):
 
 ```bash
-sudo apt install qemu-system-arm qemu-utils sshpass
+sudo apt install qemu-system-arm qemu-utils sshpass device-tree-compiler
 xz -d jellyby-pi4.img.xz
 sudo bash scripts/test-image-qemu.sh jellyby-pi4.img 2222   # logs in as pi/jellyby
+# then: ssh -p 2222 pi@127.0.0.1, systemctl status, curl 127.0.0.1:8901/api/config
 ```
+
+The release pipeline does **not** boot the image in CI (emulated Pi boots are
+slow and flaky); it gates on `scripts/check-image.sh` instead — hard no-boot
+checks on the mounted image (boot config, installed binaries, enabled
+services, permissions, JSON configs). The first real boot happens on your Pi.
 
 Cannot be emulated: real HDMI-CEC remote interaction and GPU video playback —
 those still need one boot on the Pi.
