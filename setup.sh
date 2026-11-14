@@ -69,8 +69,10 @@ install -d /etc/jellyby /opt/jellyby/www /usr/local/bin
 # Do not overwrite user-edited config on re-runs
 [[ -f /etc/jellyby/apps.json ]]      || install -m 644 "$FILES/etc/jellyby/apps.json" /etc/jellyby/apps.json
 [[ -f /etc/jellyby/cec-keymap.conf ]] || install -m 644 "$FILES/etc/jellyby/cec-keymap.conf" /etc/jellyby/cec-keymap.conf
-# players.json holds media-server credentials: root:media 0640, never overwritten
-[[ -f /etc/jellyby/players.json ]]   || install -m 640 -o root -g media "$FILES/etc/jellyby/players.json" /etc/jellyby/players.json
+# players.json holds media-server credentials (and, once gained, auth tokens):
+# media:media 0600, never overwritten — the launcher (user media) persists
+# tokens itself after authenticating; root still edits it over SSH
+[[ -f /etc/jellyby/players.json ]]   || install -m 600 -o media -g media "$FILES/etc/jellyby/players.json" /etc/jellyby/players.json
 
 cp -r "$FILES/opt/jellyby/." /opt/jellyby/
 chmod 755 /opt/jellyby/kiosk.sh /opt/jellyby/server.py /opt/jellyby/play.sh /opt/jellyby/resolve_stream.py /opt/jellyby/netapply.sh
@@ -86,7 +88,7 @@ for unit in jellyby-web jellyby-x jellyby-kiosk cec-kbd readsb; do
 done
 
 # The launcher web app saves /etc/jellyby/apps.json as user 'media'
-# (players.json keeps root:media 0640 — it contains credentials)
+# (players.json keeps media:media 0600 — it contains credentials)
 chown media:media /etc/jellyby/apps.json /etc/jellyby/cec-keymap.conf 2>/dev/null || chown -R media:media /etc/jellyby
 
 echo "==> Compiling CEC keyboard daemon"
@@ -157,7 +159,7 @@ else
   echo "  - Navigate with your projector remote (HDMI-CEC). Menu key = settings."
   echo "  - Add/edit your Emby / Jellyfin / Plex servers in the on-screen settings."
   echo "    Jellyfin/Emby tiles play natively in MPV (Pi 4 HEVC hwdec); Plex/browser tiles open in Chromium."
-  echo "  - Media server credentials for MPV: /etc/jellyby/players.json (root:media 0640)."
+  echo "  - Media server credentials for MPV: /etc/jellyby/players.json (media:media 0600)."
   echo "  - Network (static/DHCP): Settings in the launcher, or over SSH:"
   echo "    sudo /opt/jellyby/netapply.sh eth0 dhcp   # revert escape hatch"
   echo "  - readsb: edit /etc/default/readsb over SSH, then 'sudo systemctl restart readsb'."

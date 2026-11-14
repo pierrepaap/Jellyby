@@ -9,7 +9,8 @@ const state = {
   confirmAction: null,
   net: { interfaces: [], ifaceIdx: 0, mode: "dhcp", confirm: false },
   netForm: { address: "", gateway: "", dns: "" },
-};
+  media: { app: null, stack: [], items: [] },
+};;
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -47,6 +48,7 @@ function showToast(msg, isError) {
 
 function navRoot() {
   if (state.oskTarget) return $("#osk");
+  if (state.view === "media") return $("#view-media .nav-scope");
   return state.view === "settings" ? $("#view-settings .nav-scope") : $("#tiles");
 }
 
@@ -100,6 +102,10 @@ function goBack() {
   }
   if (state.editingIndex >= 0) {
     cancelForm();
+    return;
+  }
+  if (state.view === "media") {
+    mediaBack();
     return;
   }
   if (state.view === "settings") setView("home");
@@ -160,6 +166,7 @@ function setView(view) {
   state.view = view;
   $("#view-home").classList.toggle("hidden", view !== "home");
   $("#view-settings").classList.toggle("hidden", view !== "settings");
+  $("#view-media").classList.toggle("hidden", view !== "media");
   $("#view-label").textContent = view;
   if (view === "settings") { refreshStatus(); refreshNet(); }
   const els = focusables();
@@ -189,7 +196,7 @@ function renderHome() {
       badge.textContent = "MPV";
       b.appendChild(span);
       b.appendChild(badge);
-      b.addEventListener("click", () => launchApp(app));
+      b.addEventListener("click", () => openMedia(app));
       grid.appendChild(b);
     } else {
       const a = document.createElement("a");
@@ -211,26 +218,150 @@ function renderHome() {
   grid.appendChild(gear);
 }
 
-async function launchApp(app) {
+function openMedia(app) {
   if (app.type !== "mpv") {
     window.open(app.url, "_blank", "noopener");
     return;
   }
+  state.media.app = app;
+  state.media.stack = [];
+  setView("media");
+  loadMedia();
+}
+
+/* ---------- media browse (Jellyfin/Emby -> native MPV) ---------- */
+
+function fmtTicks(t) {
+  const s = Math.floor(t / 10000000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  const mm = h > 0 ? String(m % 60).padStart(2, "0") : String(m % 60);
+  return (h > 0 ? h + ":" + mm : mm) + ":" + String(s % 60).padStart(2, "0");
+}
+
+function mediaQ() {
+  return "app=" + encodeURIComponent(state.media.app.name);
+}
+
+async function loadMedia() {
+  const grid = $("#media-grid");
+  grid.innerHTML = "";
+  const p = document.createElement("p");
+  p.className = "hint";
+  p.textContent = "loading…";
+  grid.appendChild(p);
+  const stack = state.media.stack;
+  $("#media-crumb").textContent =
+    state.media.app.name + (stack.length ? " › " + stack.map((s) => s.name).join(" › ") : "");
   try {
-    const res = await api("/api/launch", {
+    let items = [];
+    if (!stack.length) {
+      const [libs, res] = await Promise.all([
+        api("/api/media/libraries?" + mediaQ()),
+        api("/api/media/resume?" + mediaQ()).catch(() => ({ items: [] })),
+      ]);
+      for (const it of (res.items || [])) {
+        if (!it.isFolder && it.resume > 0) items.push(Object.assign({ resumed: true }, it));
+      }
+      items = items.concat(libs.items || []);
+    } else {
+      const top = stack[stack.length - 1];
+      const data = await api("/api/media/items?" + mediaQ() +
+        "&parent=" + encodeURIComponent(top.id) +
+        "&type=" + encodeURIComponent(top.type || "") +
+        "&series=" + encodeURIComponent(top.series || ""));
+      items = data.items || [];
+    }
+    state.media.items = items;
+    renderMedia();
+  } catch (err) {
+    grid.innerHTML = "";
+    const e = document.createElement("p");
+    e.className = "hint";
+    e.textContent = err.message + " — check the server URL and the credentials in /etc/jellyby/players.json (SSH)";
+    grid.appendChild(e);
+  }
+}
+
+function renderMedia() {
+  const grid = $("#media-grid");
+  grid.innerHTML = "";
+  if (!state.media.items.length) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "nothing here — check the server credentials in /etc/jellyby/players.json over SSH";
+    grid.appendChild(p);
+    return;
+  }
+  for (const it of state.media.items) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "media-tile" + (it.resumed ? " resumed" : "");
+    if (it.poster) {
+      const img = document.createElement("img");
+      img.className = "media-poster";
+      img.loading = "lazy";
+      img.alt = "";
+      img.src = "/api/media/poster?" + mediaQ() + "&item=" + encodeURIComponent(it.id);
+      img.addEventListener("error", () => img.remove());
+      b.appendChild(img);
+    }
+    const label = document.createElement("span");
+    label.className = "media-label";
+    label.textContent = (it.resumed ? "▶ " : "") + it.name +
+      (it.series ? " · " + it.series : "");
+    b.appendChild(label);
+    if (!it.isFolder && it.resume > 0) {
+      const r = document.createElement("em");
+      r.className = "media-resume";
+      r.textContent = fmtTicks(it.resume);
+      b.appendChild(r);
+    }
+    b.addEventListener("click", () => mediaSelect(it));
+    grid.appendChild(b);
+  }
+  const els = focusables();
+  if (els.length) els[0].focus();
+}
+
+function mediaSelect(it) {
+  if (it.isFolder || it.type === "Series" || it.type === "Season") {
+    const series = it.type === "Series" ? it.id : (it.series_id || "");
+    state.media.stack.push({ id: it.id, name: it.name, type: it.type, series: series });
+    loadMedia();
+    return;
+  }
+  playItem(it);
+}
+
+async function playItem(it) {
+  try {
+    const res = await api("/api/media/play", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: app.name }),
+      body: JSON.stringify({
+        app: state.media.app.name,
+        item: it.id,
+        start: it.resume || 0,
+      }),
     });
     if (res.mode === "mpv") {
-      showToast(app.name + " playing in MPV (native HEVC) — exit key on the remote returns here");
+      showToast("Playing in MPV (native HEVC) — the remote exit key returns here");
     } else {
-      showToast("MPV could not resolve a stream — opening browser instead" + (res.reason ? " (" + res.reason + ")" : ""), true);
-      window.open(res.url || app.url, "_blank", "noopener");
+      showToast("MPV failed (" + (res.reason || "resolve") + ") — opening browser", true);
+      window.open(res.url || state.media.app.url, "_blank", "noopener");
     }
   } catch (err) {
-    showToast(err.message + " — opening browser", true);
-    window.open(app.url, "_blank", "noopener");
+    showToast(err.message, true);
+  }
+}
+
+function mediaBack() {
+  if (state.media.stack.length) {
+    state.media.stack.pop();
+    loadMedia();
+  } else {
+    setView("home");
   }
 }
 

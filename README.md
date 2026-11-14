@@ -154,21 +154,33 @@ So each app is a **typed** entry in `/etc/jellyby/apps.json`:
 ] }
 ```
 
-- `type: "mpv"` (default for Jellyfin/Emby): selecting the tile calls
-  `POST /api/launch`, which runs `/opt/jellyby/play.sh <name>` — it resolves a
-  direct-play stream URL from the server's REST API (stdlib
-  `resolve_stream.py`: `AuthenticateByName` → item (given `item` or latest
-  Movie/Episode) → `/Videos/{id}/stream?static=true`) and launches **system
-  mpv** fullscreen on `DISPLAY :0` with `/opt/jellyby/mpv/mpv.conf`
-  (`hwdec=auto-safe` → rpivid v4l2-request, `vo=gpu`, fullscreen). The remote's
-  exit key (Ctrl+W) is mapped to `quit` in `mpv/input.conf`, so exiting mpv
-  returns to the launcher — same UX as closing a browser tab.
-  Media-server credentials live in `/etc/jellyby/players.json` (root:media
-  0640, keyed by app name; edit over SSH).
+- `type: "mpv"` (default for Jellyfin/Emby): selecting the tile opens the
+  **media browse view** — the launcher lists the server's libraries
+  (`GET /api/media/libraries`), you drill into shows/seasons/episodes with
+  the remote (`GET /api/media/items`), and OK on a title resolves a
+  **direct-play stream URL** (`POST /api/media/play` →
+  `/Videos/{id}/stream?static=true`, original file, no transcode) and launches
+  **system mpv** fullscreen on `DISPLAY :0` with `/opt/jellyby/mpv/mpv.conf`
+  (`hwdec=auto-safe` → rpivid v4l2-request, `vo=gpu`, fullscreen). A
+  continue-watching row (`GET /api/media/resume`) sits on top; posters are
+  proxied via `/api/media/poster` so the auth token never reaches the UI.
+  The remote's exit key (Ctrl+W) is mapped to `quit` in `mpv/input.conf`, so
+  exiting mpv returns to the launcher — same UX as closing a browser tab.
+  The whole Jellyfin/Emby client is `mediaclient.py` (stdlib only,
+  `resolve_stream.py` wraps it for the CLI); Emby's `/emby` base path is
+  detected at runtime. The stream URL (with its api_key) is handed to mpv
+  via a 0600 playlist file, never via the command line.
+  Media-server credentials live in `/etc/jellyby/players.json` (media:media
+  0600, keyed by app name; edit over SSH). After the first login the launcher
+  persists the server's AccessToken + UserId there and only re-authenticates
+  when the token goes stale — the password is not used per request.
+  Playback progress is **not** reported back to the server in v1 (TODO:
+  `/Sessions/Playing{,/Progress,/Stopped}`); resume plays from the
+  server-side position.
 - `type: "browser"`: opens the URL in a Chromium tab as before (launcher UI
   itself always runs in Chromium). If MPV can't resolve a stream (server down,
-  bad credentials), `/api/launch` returns `mode: "browser"` and the UI opens
-  the browser tab — playback degrades gracefully instead of failing.
+  bad credentials), `/api/media/play` returns `mode: "browser"` and the UI
+  opens the browser tab — playback degrades gracefully instead of failing.
 - Legacy `{name, url}` entries still load (normalized to `type: "browser"`).
 - Optional polished front-ends (Jellyfin Media Player flatpak, Emby Theater
   .deb) install only with `JELLYBY_THEATER=1 sudo ./setup.sh`; system mpv
@@ -237,7 +249,7 @@ Plug the RTL-SDR dongle into the Pi before (re)starting the service.
 | File | Purpose | Edit |
 |---|---|---|
 | `/etc/jellyby/apps.json` | launcher tiles (typed: name/type/server/url/item) | in the kiosk (on-screen keyboard) or SSH |
-| `/etc/jellyby/players.json` | media-server credentials for MPV (root:media 0640) | SSH only |
+| `/etc/jellyby/players.json` | media-server credentials + auth tokens for MPV (media:media 0600) | SSH only (launcher persists tokens) |
 | `/etc/jellyby/cec-keymap.conf` | CEC button → key mapping | SSH |
 | `/etc/default/readsb` | readsb options + optional remote push target | SSH |
 

@@ -27,7 +27,7 @@ jobs:
       - name: python syntax check
         run: |
           python3 -m py_compile files/opt/jellyby/server.py
-          python3 -m py_compile files/opt/jellyby/resolve_stream.py
+          python3 -m py_compile files/opt/jellyby/resolve_stream.py files/opt/jellyby/mediaclient.py
           python3 -m py_compile scripts/gen-pinn.py
 
       - name: Set up Node (pinned)

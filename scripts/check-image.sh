@@ -82,7 +82,7 @@ check "media user in audio group" sudo grep -Eq "^audio:[^:]*:[^:]*:([^,]*,)?med
 MEDIA_UID=$(sudo sed -n 's/^media:[^:]*:\([0-9]*\):.*/\1/p' "$MNT/etc/passwd")
 MEDIA_GID=$(sudo sed -n 's/^media:[^:]*:\([0-9]*\):.*/\1/p' "$MNT/etc/group")
 check "media user exists" test -n "$MEDIA_UID"
-check "players.json is root:media 0640" test "$(sudo stat -c '%u %g %a' "$MNT/etc/jellyby/players.json")" = "0 $MEDIA_GID 640"
+check "players.json is media:media 0600" test "$(sudo stat -c '%u %g %a' "$MNT/etc/jellyby/players.json")" = "$MEDIA_UID $MEDIA_GID 600"
 check "sudoers syntax valid" sudo visudo -cf "$MNT/etc/sudoers.d/jellyby"
 check "apps.json is valid JSON" sudo python3 -m json.tool "$MNT/etc/jellyby/apps.json"
 check "players.json is valid JSON" sudo python3 -m json.tool "$MNT/etc/jellyby/players.json"
