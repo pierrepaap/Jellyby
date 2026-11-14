@@ -63,6 +63,19 @@ fi
 # mpv needs the GPU (renderD128) and the rpivid V4L2 decoder nodes (video group)
 usermod -aG video,audio media
 
+# SoC detection: the config.txt firmware config and the libcec VideoCore CEC
+# adapter are Raspberry-Pi-only. On other boards (e.g. Radxa Zero 3E/RK3566)
+# the launcher, kiosk, network settings and readsb still work — but there is
+# no HDMI-CEC remote (use a USB keyboard) and mpv falls back to software
+# decode (no mainline HEVC decoder on RK3566 yet). The CI chroot builds the
+# Pi image, so JELLYBY_OFFLINE=1 implies Pi; JELLYBY_FORCE_PI=1 overrides.
+IS_PI=1
+if [[ "${JELLYBY_FORCE_PI:-0}" != "1" && "${JELLYBY_OFFLINE:-0}" != "1" ]] \
+   && ! grep -qs raspberrypi /proc/device-tree/compatible 2>/dev/null; then
+  IS_PI=0
+  echo "==> Not a Raspberry Pi: skipping the HDMI-CEC daemon (no CEC remote; use a USB keyboard)" >&2
+fi
+
 echo "==> Installing Jellyby files"
 install -d /etc/jellyby /opt/jellyby/www /usr/local/bin
 
@@ -83,7 +96,11 @@ install -m 440 "$FILES/etc/sudoers.d/jellyby" /etc/sudoers.d/jellyby
 install -d /etc/X11/xorg.conf.d
 install -m 644 "$FILES/etc/X11/xorg.conf.d/99-jellyby.conf" /etc/X11/xorg.conf.d/99-jellyby.conf
 
-for unit in jellyby-web jellyby-x jellyby-kiosk cec-kbd readsb; do
+JELLYBY_UNITS="jellyby-web jellyby-x jellyby-kiosk readsb"
+if [[ "$IS_PI" == "1" ]]; then
+  JELLYBY_UNITS="cec-kbd $JELLYBY_UNITS"
+fi
+for unit in $JELLYBY_UNITS; do
   install -m 644 "$FILES/etc/systemd/system/$unit.service" "/etc/systemd/system/$unit.service"
 done
 
@@ -91,15 +108,17 @@ done
 # (players.json keeps media:media 0600 — it contains credentials)
 chown media:media /etc/jellyby/apps.json /etc/jellyby/cec-keymap.conf 2>/dev/null || chown -R media:media /etc/jellyby
 
-echo "==> Compiling CEC keyboard daemon"
-# libcec.pc on Debian/Raspberry Pi OS declares "Requires: p8-platform" but does
-# not ship that .pc, so pkg-config fails; fall back to plain -lcec.
-CEC_LIBS="$(pkg-config --libs libcec 2>/dev/null || true)"
-if [[ -z "${CEC_LIBS// }" ]]; then
-  CEC_LIBS="-lcec"
+if [[ "$IS_PI" == "1" ]]; then
+  echo "==> Compiling CEC keyboard daemon"
+  # libcec.pc on Debian/Raspberry Pi OS declares "Requires: p8-platform" but does
+  # not ship that .pc, so pkg-config fails; fall back to plain -lcec.
+  CEC_LIBS="$(pkg-config --libs libcec 2>/dev/null || true)"
+  if [[ -z "${CEC_LIBS// }" ]]; then
+    CEC_LIBS="-lcec"
+  fi
+  read -r -a CEC_LIB_ARGS <<< "$CEC_LIBS"
+  gcc -O2 -Wall -o /usr/local/bin/cec-kbd "$FILES/opt/jellyby/cec_kbd.c" "${CEC_LIB_ARGS[@]}"
 fi
-read -r -a CEC_LIB_ARGS <<< "$CEC_LIBS"
-gcc -O2 -Wall -o /usr/local/bin/cec-kbd "$FILES/opt/jellyby/cec_kbd.c" "${CEC_LIB_ARGS[@]}"
 
 echo "==> Building readsb from source"
 if [[ ! -x /usr/local/bin/readsb ]]; then
@@ -141,13 +160,15 @@ fi
 
 echo "==> Enabling services"
 if [[ "${JELLYBY_OFFLINE:-0}" == "1" ]]; then
-  systemctl enable ssh jellyby-web cec-kbd jellyby-x jellyby-kiosk readsb
+  # shellcheck disable=SC2086
+  systemctl enable ssh $JELLYBY_UNITS
   apt-get clean
   rm -rf /var/lib/apt/lists/* /opt/readsb-src
 else
   systemctl daemon-reload
   systemctl enable --now ssh
-  systemctl enable --now jellyby-web cec-kbd jellyby-x jellyby-kiosk readsb
+  # shellcheck disable=SC2086
+  systemctl enable --now $JELLYBY_UNITS
 fi
 
 echo

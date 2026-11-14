@@ -74,6 +74,31 @@ Jellyby appears in Raspberry Pi Imager's OS list:
 (a few minutes). It is idempotent and will not overwrite your edited
 `/etc/jellyby/apps.json` or keymap on re-runs.
 
+## Other boards (e.g. Radxa Zero 3E) — experimental
+
+The ready-to-flash image is Raspberry-Pi-only (Pi OS boot layout); on any
+other arm64 board use the option-B flow on a stock server OS (Armbian/Debian).
+`setup.sh` detects the SoC and adapts:
+
+- **Works**: launcher UI, Chromium kiosk, MPV playback, media browse, in-kiosk
+  network settings, readsb, SSH. On non-Pi boards the HDMI-CEC daemon is
+  skipped automatically (navigate with a USB keyboard/air-mouse).
+- **Does NOT work (and why)**:
+  - **HDMI-CEC remote**: RK3566 (Zero 3E) has no working mainline CEC, and
+    `cec-kbd` uses libcec's Pi VideoCore adapter. Nothing to configure — the
+    remote cannot drive the kiosk on this board.
+  - **HEVC hardware decode**: the RK3566's HEVC decoder (`rkvdec2`/VDPU346)
+    is still being upstreamed; mainline kernels only give you hantro H.264
+    (≤1080p). 10-bit HEVC falls back to **software** decode on a quad A55,
+    which stutters — the exact problem Jellyby's MPV pivot solves on the Pi 4.
+    H.264 libraries direct-play fine in mpv.
+- `JELLYBY_FORCE_PI=1` forces the Pi path (CI image builds do this via
+  `JELLYBY_OFFLINE=1`).
+
+In short: the Zero 3E makes a working launcher/readsb appliance, but not the
+CEC-driven, HEVC-hardware kiosk this project is about — for that, stay on the
+Pi 4.
+
 ## Test locally without a Pi
 
 The launcher is just a web page, and the CEC daemon injects plain keyboard
