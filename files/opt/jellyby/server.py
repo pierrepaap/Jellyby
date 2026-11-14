@@ -12,6 +12,13 @@ Serves the kiosk UI from /opt/jellyby/www and a small API on 127.0.0.1:8901:
                             -> caller opens the browser tab)
   GET  /api/network      -> current NetworkManager state
   POST /api/network      -> apply dhcp|static config via netapply.sh (sudo nmcli)
+  GET  /api/media/libraries?app=<name>   -> media libraries of a jellyfin/emby app
+  GET  /api/media/items?app=<name>&parent=<id>[&type=..&series=..]
+                                          -> children (folders, seasons, episodes)
+  GET  /api/media/resume?app=<name>      -> continue-watching items
+  GET  /api/media/poster?app=<name>&item=<id> -> poster image bytes (token stays server-side)
+  POST /api/media/play    -> {"app":..., "item":...} resolve a direct stream URL
+                            and launch system mpv via play.sh (browser fallback)
   POST /api/system/reboot
   POST /api/system/poweroff
 
@@ -24,7 +31,11 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from mediaclient import MediaClient, MediaError
 
 HOST = os.environ.get("JELLYBY_HOST", "127.0.0.1")
 PORT = int(os.environ.get("JELLYBY_PORT", "8901"))
@@ -125,6 +136,56 @@ def load_players():
     except (OSError, ValueError):
         pass
     return {}
+
+
+def save_players(players):
+    """Persist players.json (tokens gained via authenticate) atomically."""
+    tmp = PLAYERS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"players": players}, f, indent=2)
+        f.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, PLAYERS_PATH)
+
+
+def media_client(app):
+    """MediaClient for one mpv app; caches tokens, re-auths when stale.
+
+    Tokens are persisted back into players.json (media:media 0600) so the
+    password is only used when the token stops working. Never echo tokens.
+    """
+    if app.get("type") != "mpv" or app.get("server") not in ("jellyfin", "emby"):
+        raise ValueError(f"app {app.get('name')!r} is not a jellyfin/emby mpv app")
+    players = load_players()
+    cred = players.get(app["name"], {})
+    c = MediaClient(app["server"], app["url"])
+    token = str(cred.get("token", ""))
+    uid = str(cred.get("user_id", ""))
+    if token and uid:
+        c.set_auth(token, uid)
+        try:
+            c.check_auth()
+            return c
+        except MediaError:
+            c.set_auth("", "")
+    user = str(cred.get("username", ""))
+    pw = str(cred.get("password", ""))
+    if not user or not pw:
+        raise ValueError(f"no credentials for {app['name']!r} "
+                         f"(set username/password in {PLAYERS_PATH} over SSH)")
+    token, uid = c.authenticate(user, pw)
+    cred["token"] = token
+    cred["user_id"] = uid
+    players[app["name"]] = cred
+    try:
+        save_players(players)
+    except OSError:
+        pass  # token stays cached in this process only
+    return c
+
+
+def find_app(name):
+    return next((a for a in load_apps()["apps"] if a["name"] == name), None)
 
 
 def service_status():
@@ -270,6 +331,21 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return self.rfile.read(length)
 
+    def _query(self):
+        return {k: v[0] for k, v in
+                urllib.parse.parse_qs(self.path.split("?", 1)[1]).items()} \
+            if "?" in self.path else {}
+
+    def _media_app(self):
+        q = self._query()
+        name = str(q.get("app", "")).strip()
+        if not name:
+            raise ValueError("missing app parameter")
+        app = find_app(name)
+        if app is None:
+            raise LookupError(f"no app named {name!r}")
+        return app
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/":
@@ -282,6 +358,42 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"services": service_status()})
         if path == "/api/network":
             return self._json(network_state())
+        if path.startswith("/api/media/"):
+            return self._do_media_get(path)
+        return self._json({"error": "not found"}, 404)
+
+    def _do_media_get(self, path):
+        try:
+            app = self._media_app()
+            client = media_client(app)
+        except ValueError as e:
+            return self._json({"error": str(e)}, 400)
+        except LookupError as e:
+            return self._json({"error": str(e)}, 404)
+        except MediaError as e:
+            return self._json({"error": str(e)}, 502)
+        try:
+            if path == "/api/media/libraries":
+                return self._json({"app": app["name"], "items": client.libraries()})
+            if path == "/api/media/resume":
+                return self._json({"app": app["name"], "items": client.resume()})
+            if path == "/api/media/items":
+                q = self._query()
+                parent = str(q.get("parent", "")).strip()
+                if not parent:
+                    return self._json({"error": "missing parent parameter"}, 400)
+                items = client.children(parent, str(q.get("type", "")),
+                                        str(q.get("series", "")))
+                return self._json({"app": app["name"], "items": items})
+            if path == "/api/media/poster":
+                q = self._query()
+                item = str(q.get("item", "")).strip()
+                if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", item):
+                    return self._json({"error": "invalid item"}, 400)
+                data = client.poster(item)
+                return self._send(200, data, "image/jpeg")
+        except MediaError as e:
+            return self._json({"error": str(e)}, 502)
         return self._json({"error": "not found"}, 404)
 
     def do_POST(self):
@@ -326,6 +438,51 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "mode": "browser", "url": app["url"],
                                "fallback": True,
                                "reason": (r.stderr or "").strip().splitlines()[-1] if r.stderr else "resolve failed"})
+        if path == "/api/media/play":
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+                app = find_app(str(payload.get("app", "")).strip())
+                if app is None:
+                    return self._json({"error": "no such app"}, 404)
+                item = str(payload.get("item", "")).strip()
+                if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", item):
+                    return self._json({"error": "invalid item"}, 400)
+                client = media_client(app)
+                url, start_ticks = client.resolve_stream(item)
+            except (ValueError, UnicodeDecodeError) as e:
+                return self._json({"error": str(e)}, 400)
+            except MediaError as e:
+                return self._json({"ok": True, "mode": "browser", "url": app["url"],
+                                   "fallback": True, "reason": str(e)})
+            # Hand the URL to play.sh via a 0600 file: the api_key must not
+            # appear in mpv's argv (/proc/<pid>/cmdline is world-readable).
+            start = int(payload.get("start", start_ticks) or 0)
+            args = [PLAY_SH, app["name"], "--url-file", "PLACEHOLDER"]
+            if start > 0:
+                args += ["--start", str(start // 10_000_000)]
+            tmp_name = ""
+            try:
+                with tempfile.NamedTemporaryFile("w", suffix=".m3u", delete=False,
+                                                 encoding="utf-8") as tf:
+                    tmp_name = tf.name
+                    os.chmod(tf.name, 0o600)
+                    tf.write(url + "\n")
+                    tf.flush()
+                args[args.index("PLACEHOLDER")] = tmp_name
+                r = subprocess.run(args, capture_output=True, text=True, timeout=25)
+            except (subprocess.TimeoutExpired, OSError) as e:
+                if tmp_name:
+                    try:
+                        os.unlink(tmp_name)
+                    except OSError:
+                        pass
+                return self._json({"ok": True, "mode": "browser", "url": app["url"],
+                                   "fallback": True, "reason": str(e)})
+            if r.returncode != 0:
+                return self._json({"ok": True, "mode": "browser", "url": app["url"],
+                                   "fallback": True,
+                                   "reason": (r.stderr or "").strip().splitlines()[-1] if r.stderr else "play failed"})
+            return self._json({"ok": True, "mode": "mpv"})
         if path == "/api/network":
             try:
                 payload = json.loads(raw.decode("utf-8"))

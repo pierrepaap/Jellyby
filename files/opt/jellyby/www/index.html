@@ -14,7 +14,13 @@
 <main>
   <section id="view-home" class="view">
     <div id="tiles" class="tiles nav-scope"></div>
-    <p class="hint">Arrows + OK to navigate &middot; Back = close &middot; Menu key = settings &middot; MPV tiles play natively (HEVC hwdec), browser tiles open in a tab</p>
+    <p class="hint">Arrows + OK to navigate &middot; Back = close &middot; Menu key = settings &middot; MPV tiles browse the server and play natively (HEVC hwdec), browser tiles open in a tab</p>
+  </section>
+
+  <section id="view-media" class="view hidden">
+    <div id="media-crumb" class="hint"></div>
+    <div id="media-grid" class="tiles media-grid nav-scope"></div>
+    <p class="hint">Arrows + OK to browse &middot; Back = up one level &middot; OK on a title plays it in MPV (native HEVC)</p>
   </section>
 
   <section id="view-settings" class="view hidden">
