@@ -23,6 +23,7 @@ entirely by your **TV/projector remote over HDMI-CEC**.
 - [Network settings](#network-settings)
 - [CEC remote mapping](#cec-remote-mapping)
 - [readsb (ADS-B)](#readsb-ads-b)
+- [Settings reference](#settings-reference)
 - [Configuration files](#configuration-files)
 - [Development and testing](#development-and-testing)
 - [Release pipeline](#release-pipeline)
@@ -41,16 +42,9 @@ entirely by your **TV/projector remote over HDMI-CEC**.
 | Image | `jellyby-pi4.img.xz`, Imager, PINN | `jellyby-zero3.img.xz` (flash with Etcher / `dd`) |
 | RAM | 2 GB+ | 1 GB works but is tight (Chromium + 4K mpv) — 2 GB+ preferred |
 
-`setup.sh` detects the board from the device tree (override with
-`JELLYBY_BOARD=pi4|zero3`) and installs the matching mpv hwdec profile
-(`files/opt/jellyby/mpv/board-<board>.conf`).
-
-**About mpv on the ZERO 3:** Debian's mpv/ffmpeg cannot use the RK3566's
-hardware decoder. Point `JELLYBY_MPV_DEBS` at .debs of an mpv built against
-[ffmpeg-rockchip](https://github.com/nyanmisaka/ffmpeg-rockchip) (or install
-such a build yourself); otherwise playback works but decodes in software,
-which is too slow for 4K/HEVC. Encoders are not needed — Jellyby only
-direct-plays.
+`setup.sh` detects the board by itself and installs the matching mpv
+hardware-decode profile. ZERO 3 install steps:
+[Option D](#option-d--radxa-zero-3e3w-experimental-untested-on-hardware).
 
 ## Architecture
 
@@ -116,7 +110,7 @@ direct-plays.
 minutes) and writes the required `config.txt` lines. It is idempotent and does
 not overwrite an edited `/etc/jellyby/apps.json` or keymap on re-runs.
 
-Optional: `JELLYBY_THEATER=1 sudo ./setup.sh` also installs Jellyfin Media
+Optional: `sudo JELLYBY_THEATER=1 ./setup.sh` also installs Jellyfin Media
 Player (flatpak) / Emby Theater (.deb). System mpv stays the decode path either
 way.
 
@@ -136,37 +130,80 @@ Jellyby can sit alongside other OSes on one SD card:
 3. PINN writes the partitions and runs `partition_setup.sh`, which rewrites
    `cmdline.txt`/`fstab` to the new PARTUUIDs. The rootfs expands on first boot.
 
-### Option D — Radxa ZERO 3E/3W (experimental)
+### Option D — Radxa ZERO 3E/3W (experimental, untested on hardware)
 
-From a prebuilt image: flash `jellyby-zero3.img.xz` from the release (if
-present) with balenaEtcher or `xz -dc jellyby-zero3.img.xz | sudo dd of=/dev/sdX bs=4M`.
-Login **pi / jellyby** (root is locked) — change it right away.
+You need: the board, a microSD card (16 GB+), a **micro-HDMI** cable to the
+display, Ethernet (the 3E has no Wi-Fi), and a USB-C power supply.
 
-On your own Armbian (vendor kernel) install:
+There are two ways in. **D1** is simplest but only works once a release has
+been published with a `jellyby-zero3.img.xz` asset; **D2** works today.
+
+#### D1 — prebuilt image
+
+1. Download `jellyby-zero3.img.xz` from the
+   [latest release](https://github.com/pierrepaap/Jellyby/releases/latest).
+2. Flash it with [balenaEtcher](https://etcher.balena.io/) (or Raspberry Pi
+   Imager → *Use custom*), or from Linux:
+   `xz -dc jellyby-zero3.img.xz | sudo dd of=/dev/sdX bs=4M status=progress`.
+3. Boot the board with HDMI + Ethernet. Find its IP on your router and log in:
+   `ssh pi@<ip>` — password **jellyby** (root is locked). Change it: `passwd`.
+4. Continue with [First checks](#first-checks-on-the-zero-3) below.
+
+#### D2 — install on top of Armbian
+
+1. **Flash Armbian.** From the
+   [Armbian Radxa ZERO 3 page](https://www.armbian.com/radxa-zero-3/), download
+   a **minimal / server** image with the **vendor** kernel (Debian Trixie or
+   Bookworm) and flash it to the microSD as above.
+2. **First boot.** Boot with HDMI + Ethernet, then `ssh root@<ip>`
+   (password `1234`). Armbian's first-login wizard asks for a new root password
+   and lets you create your own user — do that, then log in as that user.
+3. **Install Jellyby:**
+
+   ```bash
+   sudo apt-get update && sudo apt-get install -y git
+   git clone https://github.com/pierrepaap/Jellyby.git
+   cd Jellyby
+   sudo ./setup.sh
+   sudo reboot
+   ```
+
+   `setup.sh` detects the board by itself. It installs everything, puts the
+   decoder/CEC device nodes in the `video` group (udev rule) and holds the
+   kernel packages so an upgrade can't drop the vendor kernel.
+4. After the reboot the launcher appears on HDMI. Continue with the checks.
+
+> **Video decoding.** Without extra steps, Jellyby uses Debian's mpv, which
+> **cannot** use the RK3566 hardware decoder: playback works but decodes in
+> software (fine for 1080p H.264, too slow for 4K/HEVC). Once you have .deb
+> packages of an mpv built against
+> [ffmpeg-rockchip](https://github.com/nyanmisaka/ffmpeg-rockchip), re-run the
+> installer with them — it is safe to re-run:
+>
+> ```bash
+> cd ~/Jellyby
+> sudo JELLYBY_MPV_DEBS="/home/me/debs/mpv_*.deb /home/me/debs/libmpv2_*.deb" ./setup.sh
+> ```
+>
+> See [Settings reference](#settings-reference) for what this variable takes.
+
+#### First checks on the ZERO 3
+
+Over SSH:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y git
-git clone https://github.com/pierrepaap/Jellyby.git && cd Jellyby
-sudo JELLYBY_MPV_DEBS="<urls or paths of MPP-enabled mpv .debs>" ./setup.sh
-sudo reboot
-```
-
-`setup.sh` also puts the MPP/RGA/DMA-heap device nodes in the `video` group
-(udev rule) and holds the kernel packages (`apt-mark hold`) so an upgrade
-can't drop the vendor kernel; skip that with `JELLYBY_HOLD_KERNEL=0`.
-
-First checks on the board:
-
-```bash
-ls /dev/cec0 /dev/mpp_service /dev/rga /dev/dma_heap   # CEC + decoder nodes
-cec-client -l                                          # should list a Linux CEC adapter
+ls /dev/cec0 /dev/mpp_service /dev/rga /dev/dma_heap   # CEC + decoder device nodes exist?
+cec-client -l                                          # should list a "Linux" CEC adapter
 journalctl -u cec-kbd -b                               # which CEC port cec-kbd opened
-mpv --hwdec=rkmpp --msg-level=vd=v <file>              # look for "Using hardware decoding (rkmpp)"
+mpv --hwdec=rkmpp --msg-level=vd=v <video-file>        # look for "Using hardware decoding (rkmpp)"
 ```
 
-If `/dev/cec0` is missing, the board's device tree needs a CEC overlay
-(`overlays=...` in `/boot/armbianEnv.txt`). `cec-kbd` picks the port from
-`$CEC_KBD_PORT`, else the first detected adapter, else `/dev/cec0`.
+- `/dev/cec0` missing → the board's device tree needs a CEC overlay
+  (`overlays=...` in `/boot/armbianEnv.txt`); the remote won't work until then.
+  A keyboard plugged into the board works meanwhile.
+- `cec-kbd` opened the wrong port → force it, see `CEC_KBD_PORT` below.
+- No "Using hardware decoding" line → mpv is not MPP-enabled (see the
+  video decoding note above).
 
 ## Using the launcher
 
@@ -265,6 +302,49 @@ sudo systemctl status readsb     # check the dongle is detected
 
 Plug the RTL-SDR dongle in before (re)starting the service.
 
+## Settings reference
+
+All Jellyby options are environment variables. They are **optional** — the
+defaults are right for a normal install. There are three places they go:
+
+**1. On the command line of `setup.sh`** (on the board, at install time — put
+them *after* `sudo` so sudo keeps them), e.g.
+`sudo JELLYBY_THEATER=1 ./setup.sh`. Re-running `setup.sh` with different
+values is safe.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `JELLYBY_BOARD` | auto-detected | `pi4` or `zero3`. Only needed if detection fails (you'll be asked) |
+| `JELLYBY_MPV_DEBS` | empty | ZERO 3 only: space-separated paths or URLs of MPP-enabled mpv/ffmpeg `.deb`s to install instead of Debian's mpv |
+| `JELLYBY_HOLD_KERNEL` | `1` | ZERO 3 only: `0` = don't `apt-mark hold` the kernel packages |
+| `JELLYBY_THEATER` | `0` | `1` = also install Jellyfin Media Player (flatpak) / Emby Theater |
+| `JELLYBY_OFFLINE` | `0` | CI only (image build in a chroot) — don't set by hand |
+
+**2. In the `cec-kbd` service** (on the board, any time), only if the CEC
+remote doesn't work because the wrong port was picked:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CEC_KBD_PORT` | auto | CEC port to open, e.g. `/dev/cec0` (or `RPI` for the legacy Pi firmware adapter) |
+
+```bash
+sudo systemctl edit cec-kbd
+#   add these two lines, save:
+#   [Service]
+#   Environment=CEC_KBD_PORT=/dev/cec0
+sudo systemctl restart cec-kbd
+```
+
+**3. As GitHub repository variables** (only if you build release images: on
+GitHub → repo **Settings → Secrets and variables → Actions → Variables** tab →
+*New repository variable*). They're read by the image build when a release
+is published:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `ZERO3_BASE_IMAGE_URL` | `https://dl.armbian.com/radxa-zero3/Trixie_vendor_minimal` | Armbian image the ZERO 3 build starts from — set it if the default link stops working |
+| `ZERO3_MPV_DEBS` | empty | URLs of MPP-enabled mpv/ffmpeg `.deb`s baked into the ZERO 3 image (same as `JELLYBY_MPV_DEBS`) |
+
 ## Configuration files
 
 | File | Purpose | Edit via |
@@ -325,8 +405,8 @@ Emulation caveats (handled by the script):
 HEVC (incl. 10-bit) hardware decode in mpv, HDMI-CEC remote pairing, actual
 playback of your library, readsb with a dongle. Useful checks over SSH on a
 Pi 4: `mpv --hwdec=auto-safe --msg-level=all=v <file>` and
-`v4l2-ctl -d /dev/video10 --list-formats`. For the ZERO 3, see the first
-checks under [Option D](#option-d--radxa-zero-3e3w-experimental).
+`v4l2-ctl -d /dev/video10 --list-formats`. For the ZERO 3, see
+[First checks on the ZERO 3](#first-checks-on-the-zero-3).
 
 ## Release pipeline
 
@@ -348,10 +428,8 @@ checks under [Option D](#option-d--radxa-zero-3e3w-experimental).
   7. attaches the image(s) to the release.
 
   The `zero3` job is **experimental**: if it fails, the Pi image still
-  publishes. Optional repository variables tune it:
-  `ZERO3_BASE_IMAGE_URL` (Armbian image; default
-  `https://dl.armbian.com/radxa-zero3/Trixie_vendor_minimal`) and
-  `ZERO3_MPV_DEBS` (MPP-enabled mpv/ffmpeg .debs to bake in).
+  publishes. It can be tuned with GitHub repository variables, see
+  [Settings reference](#settings-reference).
 
 ## Security notes
 
