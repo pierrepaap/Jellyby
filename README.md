@@ -1,12 +1,13 @@
 # Jellyby
 
-A small appliance image for the **Raspberry Pi 4** that boots straight into a
+A small appliance image for the **Raspberry Pi 4** (and, experimentally, the
+**Radxa ZERO 3E/3W**) that boots straight into a
 fullscreen launcher for your **Jellyfin**, **Emby** and **Plex** (or any other
 web) servers — no Kodi, no sync, no plugins, just like a smart-TV app — driven
 entirely by your **TV/projector remote over HDMI-CEC**.
 
 - Jellyfin/Emby libraries are browsed in the launcher and played in **native
-  mpv** with Pi 4 hardware HEVC decoding (direct play, no transcode).
+  mpv** with hardware HEVC decoding (direct play, no transcode).
 - Anything else (Plex, other web UIs) opens in a **Chromium kiosk** tab.
 - The same Pi can run **readsb** with an RTL-SDR dongle; the tar1090 map runs
   in a container on another machine.
@@ -14,6 +15,7 @@ entirely by your **TV/projector remote over HDMI-CEC**.
 
 ## Contents
 
+- [Supported boards](#supported-boards)
 - [Architecture](#architecture)
 - [Install](#install)
 - [Using the launcher](#using-the-launcher)
@@ -26,6 +28,29 @@ entirely by your **TV/projector remote over HDMI-CEC**.
 - [Release pipeline](#release-pipeline)
 - [Security notes](#security-notes)
 - [Repo layout](#repo-layout)
+
+## Supported boards
+
+| | Raspberry Pi 4 | Radxa ZERO 3E / 3W (experimental) |
+|---|---|---|
+| Status | supported, tested | **untested on hardware** — code paths in place |
+| Base OS | Raspberry Pi OS Lite 64-bit | Armbian, **vendor (6.1) kernel** |
+| HEVC hardware decode | rpivid via v4l2-request (Pi OS's mpv) | Rockchip MPP — needs an **MPP-enabled mpv** (see below) |
+| HDMI-CEC | `/dev/cec0` (vc4-kms) | `/dev/cec0` (dw-hdmi) — likely enabled by the vendor device tree, unconfirmed |
+| Boot config | `config.txt` (written by `setup.sh`) | `/boot/armbianEnv.txt` (left as shipped) |
+| Image | `jellyby-pi4.img.xz`, Imager, PINN | `jellyby-zero3.img.xz` (flash with Etcher / `dd`) |
+| RAM | 2 GB+ | 1 GB works but is tight (Chromium + 4K mpv) — 2 GB+ preferred |
+
+`setup.sh` detects the board from the device tree (override with
+`JELLYBY_BOARD=pi4|zero3`) and installs the matching mpv hwdec profile
+(`files/opt/jellyby/mpv/board-<board>.conf`).
+
+**About mpv on the ZERO 3:** Debian's mpv/ffmpeg cannot use the RK3566's
+hardware decoder. Point `JELLYBY_MPV_DEBS` at .debs of an mpv built against
+[ffmpeg-rockchip](https://github.com/nyanmisaka/ffmpeg-rockchip) (or install
+such a build yourself); otherwise playback works but decodes in software,
+which is too slow for 4K/HEVC. Encoders are not needed — Jellyby only
+direct-plays.
 
 ## Architecture
 
@@ -111,6 +136,38 @@ Jellyby can sit alongside other OSes on one SD card:
 3. PINN writes the partitions and runs `partition_setup.sh`, which rewrites
    `cmdline.txt`/`fstab` to the new PARTUUIDs. The rootfs expands on first boot.
 
+### Option D — Radxa ZERO 3E/3W (experimental)
+
+From a prebuilt image: flash `jellyby-zero3.img.xz` from the release (if
+present) with balenaEtcher or `xz -dc jellyby-zero3.img.xz | sudo dd of=/dev/sdX bs=4M`.
+Login **pi / jellyby** (root is locked) — change it right away.
+
+On your own Armbian (vendor kernel) install:
+
+```bash
+sudo apt-get update && sudo apt-get install -y git
+git clone https://github.com/pierrepaap/Jellyby.git && cd Jellyby
+sudo JELLYBY_MPV_DEBS="<urls or paths of MPP-enabled mpv .debs>" ./setup.sh
+sudo reboot
+```
+
+`setup.sh` also puts the MPP/RGA/DMA-heap device nodes in the `video` group
+(udev rule) and holds the kernel packages (`apt-mark hold`) so an upgrade
+can't drop the vendor kernel; skip that with `JELLYBY_HOLD_KERNEL=0`.
+
+First checks on the board:
+
+```bash
+ls /dev/cec0 /dev/mpp_service /dev/rga /dev/dma_heap   # CEC + decoder nodes
+cec-client -l                                          # should list a Linux CEC adapter
+journalctl -u cec-kbd -b                               # which CEC port cec-kbd opened
+mpv --hwdec=rkmpp --msg-level=vd=v <file>              # look for "Using hardware decoding (rkmpp)"
+```
+
+If `/dev/cec0` is missing, the board's device tree needs a CEC overlay
+(`overlays=...` in `/boot/armbianEnv.txt`). `cec-kbd` picks the port from
+`$CEC_KBD_PORT`, else the first detected adapter, else `/dev/cec0`.
+
 ## Using the launcher
 
 - **Home**: one tile per configured app.
@@ -127,10 +184,12 @@ Jellyby can sit alongside other OSes on one SD card:
 
 ## Playback: mpv vs browser
 
-No browser on a Pi 4 can hardware-decode HEVC/H.265 — only mpv/ffmpeg through
-the kernel's rpivid V4L2 stateless decoder. That requires
-`dtoverlay=vc4-kms-v3d` and `gpu_mem=256` in `config.txt` (`setup.sh` adds
-them). So each app in `/etc/jellyby/apps.json` is **typed**:
+No browser on these boards can hardware-decode HEVC/H.265 — only mpv/ffmpeg
+can. On the Pi 4 that goes through the kernel's rpivid V4L2 stateless decoder,
+which requires `dtoverlay=vc4-kms-v3d` and `gpu_mem=256` in `config.txt`
+(`setup.sh` adds them); on the Radxa ZERO 3 through Rockchip MPP (see
+[Supported boards](#supported-boards)). So each app in
+`/etc/jellyby/apps.json` is **typed**:
 
 ```json
 { "apps": [
@@ -149,7 +208,8 @@ them). So each app in `/etc/jellyby/apps.json` is **typed**:
   reaches the UI.
 - Playing (`POST /api/media/play`) resolves a **direct-play** URL
   (`/Videos/{id}/stream?static=true`, original file) and starts mpv with
-  `/opt/jellyby/mpv/mpv.conf` (`hwdec=auto-safe`, `vo=gpu`, fullscreen). The
+  `/opt/jellyby/mpv/mpv.conf` (`vo=gpu`, fullscreen) plus the board's hwdec
+  profile `board.conf` (`auto-safe` on Pi 4, `rkmpp` on ZERO 3). The
   URL is passed via a 0600 playlist file, never on the command line.
 - Credentials live in `/etc/jellyby/players.json`, keyed by app name (edit over
   SSH). After the first login the AccessToken + UserId are stored there and
@@ -230,7 +290,8 @@ It uses a temp copy of `files/etc/jellyby/apps.json`, so the repo is untouched.
 ### Image checks without booting
 
 ```bash
-sudo bash scripts/check-image.sh jellyby-pi4.img
+sudo bash scripts/check-image.sh jellyby-pi4.img            # pi4 (default)
+sudo bash scripts/check-image.sh jellyby-zero3.img zero3
 ```
 
 Mounts the image and verifies boot config, installed binaries, enabled
@@ -238,7 +299,7 @@ services, permissions and JSON configs. This is what gates releases in CI.
 
 ### Booting the image in QEMU (manual, not in CI)
 
-`scripts/test-image-qemu.sh` boots a resized copy of the image, waits for SSH
+Pi image only. `scripts/test-image-qemu.sh` boots a resized copy of the image, waits for SSH
 and runs smoke checks; the serial console is saved to `qemu-console.log`.
 
 ```bash
@@ -259,12 +320,13 @@ Emulation caveats (handled by the script):
 - No GPU and no HDMI-CEC: the kiosk UI, remote and video playback can't be
   tested there.
 
-### What can only be verified on a real Pi 4
+### What can only be verified on real hardware
 
 HEVC (incl. 10-bit) hardware decode in mpv, HDMI-CEC remote pairing, actual
-playback of your library, readsb with a dongle. Useful checks over SSH:
-`mpv --hwdec=auto-safe --msg-level=all=v <file>` and
-`v4l2-ctl -d /dev/video10 --list-formats`.
+playback of your library, readsb with a dongle. Useful checks over SSH on a
+Pi 4: `mpv --hwdec=auto-safe --msg-level=all=v <file>` and
+`v4l2-ctl -d /dev/video10 --list-formats`. For the ZERO 3, see the first
+checks under [Option D](#option-d--radxa-zero-3e3w-experimental).
 
 ## Release pipeline
 
@@ -273,20 +335,29 @@ playback of your library, readsb with a dongle. Useful checks over SSH:
   JSON syntax checks.
 - **[`release-image.yml`](.github/workflows/release-image.yml)** runs when a
   GitHub release is **published** (Releases → New release → tag e.g. `v0.5.0`
-  → Publish). It:
-  1. downloads the latest Pi OS Lite (64-bit) and grows it;
-  2. enables SSH and the default user on the boot partition;
-  3. runs `setup.sh` in a chroot under `qemu-user-static` (`JELLYBY_OFFLINE=1`);
+  → Publish). One job per board (`pi4`, `zero3`), each of which:
+  1. downloads the base image (latest Pi OS Lite 64-bit / Armbian vendor) and
+     grows it;
+  2. sets up SSH and the default user `pi / jellyby` (on the ZERO 3 it also
+     skips Armbian's first-login wizard and locks root);
+  3. runs `setup.sh` in a chroot under `qemu-user-static`
+     (`JELLYBY_OFFLINE=1 JELLYBY_BOARD=<board>`);
   4. shrinks it with PiShrink (auto-expands on first boot) and compresses it;
-  5. gates on `scripts/check-image.sh`;
-  6. packs the PINN assets and the Imager JSON (with size + sha256);
-  7. attaches `jellyby-pi4.img.xz`, `jellyby-imager.json` and the PINN files to
-     the release.
+  5. gates on `scripts/check-image.sh <image> <board>`;
+  6. Pi only: packs the PINN assets and the Imager JSON (with size + sha256);
+  7. attaches the image(s) to the release.
+
+  The `zero3` job is **experimental**: if it fails, the Pi image still
+  publishes. Optional repository variables tune it:
+  `ZERO3_BASE_IMAGE_URL` (Armbian image; default
+  `https://dl.armbian.com/radxa-zero3/Trixie_vendor_minimal`) and
+  `ZERO3_MPV_DEBS` (MPP-enabled mpv/ffmpeg .debs to bake in).
 
 ## Security notes
 
-- The prebuilt image's default login is **pi / jellyby** — change it on first
-  boot, use SSH keys, or set your own user in Imager.
+- The prebuilt images' default login is **pi / jellyby** — change it on first
+  boot, use SSH keys, or set your own user in Imager (Pi). On the ZERO 3 image,
+  Armbian's default root password is locked.
 - Kiosk Chromium runs **with its sandbox** (no `--no-sandbox`), relying on
   unprivileged user namespaces (default on Pi OS Bookworm), since it loads
   remote web UIs.
@@ -306,10 +377,12 @@ files/                         installed into / by setup.sh
   etc/systemd/system/          service units (jellyby-web/-x/-kiosk, cec-kbd, readsb)
   etc/jellyby/                 apps.json, players.json, cec-keymap.conf
   etc/sudoers.d/jellyby        the kiosk user's allowed privileged commands
+  etc/udev/rules.d/            Rockchip decoder/CEC device permissions (ZERO 3 only)
   etc/X11/xorg.conf.d/         Xorg config
   etc/default/readsb           readsb options
   opt/jellyby/                 server.py, mediaclient.py, resolve_stream.py, play.sh,
-                               netapply.sh, kiosk.sh, cec_kbd.c, mpv/, www/ (launcher UI)
+                               netapply.sh, kiosk.sh, cec_kbd.c, www/ (launcher UI),
+                               mpv/ (mpv.conf + board-pi4.conf / board-zero3.conf hwdec profiles)
   usr/local/bin/               readsb-wrapper.sh
 scripts/
   serve-local.sh               run the launcher on any PC
