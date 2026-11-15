@@ -16,7 +16,14 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 
+# Low-RAM boards (Radxa ZERO 3, 1-2 GB) share memory with mpv: cap renderers.
+EXTRA_FLAGS=()
+if [ "$(cat /etc/jellyby/board 2>/dev/null || true)" = "zero3" ]; then
+  EXTRA_FLAGS=(--renderer-process-limit=2 --disable-features=BackForwardCache)
+fi
+
 exec "$BIN" \
+  "${EXTRA_FLAGS[@]}" \
   --kiosk \
   --disable-breakpad \
   --no-first-run \

@@ -1,8 +1,21 @@
 name: release-image
 
-# Builds a ready-to-flash Jellyby image (Pi OS Lite 64-bit + setup.sh run in a
-# chroot under qemu-user-static), shrinks it, and attaches the image plus a
-# Raspberry Pi Imager custom-repo JSON to the published GitHub Release.
+# Builds ready-to-flash Jellyby images and attaches them to the published
+# GitHub Release, one job per board:
+#
+#   pi4    Raspberry Pi OS Lite 64-bit (p1 = FAT boot, p2 = rootfs)
+#          -> jellyby-pi4.img.xz + Raspberry Pi Imager JSON + PINN assets
+#   zero3  Armbian, vendor kernel, for Radxa ZERO 3E/3W (single ext4 rootfs)
+#          -> jellyby-zero3.img.xz   (experimental: a failure here does not
+#             block the Pi image)
+#
+# Each job: download base image, grow it, run setup.sh in a chroot under
+# qemu-user-static, shrink with PiShrink, gate on scripts/check-image.sh, publish.
+#
+# Optional repository variables (Settings -> Secrets and variables -> Variables):
+#   ZERO3_BASE_IMAGE_URL  Armbian image for the Radxa ZERO 3 (vendor kernel)
+#   ZERO3_MPV_DEBS        space-separated URLs of MPP-enabled mpv/ffmpeg .debs;
+#                         without them the zero3 image decodes video in software
 #
 # Single trigger: publishing a release (Releases -> New release -> Publish).
 # The lint workflow still runs on every PR/push and gates merges; image builds
@@ -23,6 +36,23 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - board: pi4
+            base_url: https://downloads.raspberrypi.com/raspios_lite_arm64_latest
+            root_part: 2
+            experimental: false
+          - board: zero3
+            base_url: https://dl.armbian.com/radxa-zero3/Trixie_vendor_minimal
+            root_part: 1
+            experimental: true
+    env:
+      BOARD: ${{ matrix.board }}
+      ROOT_PART: ${{ matrix.root_part }}
+      OUT_IMG: jellyby-${{ matrix.board }}.img
     steps:
       - uses: actions/checkout@v6
 
@@ -31,9 +61,13 @@ jobs:
           sudo bash scripts/ci-apt.sh qemu-user-static binfmt-support parted e2fsprogs xz-utils curl openssl cloud-guest-utils
           test -x /usr/bin/qemu-aarch64-static   # guard: apt must not have skipped it
 
-      - name: Download Raspberry Pi OS Lite (64-bit, latest)
+      - name: Download base image (${{ matrix.board }})
+        env:
+          URL_OVERRIDE: ${{ matrix.board == 'zero3' && vars.ZERO3_BASE_IMAGE_URL || '' }}
         run: |
-          curl -fL -o base.img.xz https://downloads.raspberrypi.com/raspios_lite_arm64_latest
+          URL="${URL_OVERRIDE:-${{ matrix.base_url }}}"
+          echo "base image: $URL"
+          curl -fL -o base.img.xz "$URL"
           xz -d -k base.img.xz
 
       - name: Grow image by 8G for the in-image apt install (pishrink shrinks it back at the end)
@@ -41,55 +75,91 @@ jobs:
           truncate -s +8G base.img
           LOOP=$(sudo losetup -fP --show base.img)
           echo "LOOP=$LOOP" >> "$GITHUB_ENV"
-          sudo growpart "$LOOP" 2
+          sudo growpart "$LOOP" "$ROOT_PART"
           sudo partprobe "$LOOP"
-          sudo e2fsck -fy "${LOOP}p2"
-          sudo resize2fs "${LOOP}p2"
+          sudo e2fsck -fy "${LOOP}p${ROOT_PART}"
+          sudo resize2fs "${LOOP}p${ROOT_PART}"
 
       - name: Mount image partitions
         run: |
-          sudo mkdir -p /mnt/jb-boot /mnt/jb-root
-          sudo mount "${LOOP}p1" /mnt/jb-boot
-          sudo mount "${LOOP}p2" /mnt/jb-root
+          sudo mkdir -p /mnt/jb-root
+          sudo mount "${LOOP}p${ROOT_PART}" /mnt/jb-root
+          if [ "$BOARD" = "pi4" ]; then
+            sudo mkdir -p /mnt/jb-boot
+            sudo mount "${LOOP}p1" /mnt/jb-boot
+          fi
 
       - name: First-boot settings on the boot partition (SSH, default user)
+        if: matrix.board == 'pi4'
         run: |
           sudo touch /mnt/jb-boot/ssh
           echo "pi:$(openssl passwd -6 jellyby)" | sudo tee /mnt/jb-boot/userconf.txt
           # config.txt itself (KMS/gpu_mem/splash) is written by setup.sh via the bind mount below
 
       - name: Run setup.sh in chroot (ARM64 under qemu-user-static)
+        env:
+          MPV_DEBS: ${{ matrix.board == 'zero3' && vars.ZERO3_MPV_DEBS || '' }}
         run: |
+          # resolv.conf is often a symlink into /run (systemd-resolved): park
+          # it and put a real file in place for the chroot's apt, restore after.
+          if sudo test -e /mnt/jb-root/etc/resolv.conf || sudo test -L /mnt/jb-root/etc/resolv.conf; then
+            sudo mv /mnt/jb-root/etc/resolv.conf /mnt/jb-root/etc/resolv.conf.jellyby-orig
+          fi
           sudo cp -L /etc/resolv.conf /mnt/jb-root/etc/resolv.conf
           sudo cp /usr/bin/qemu-aarch64-static /mnt/jb-root/usr/bin/
           sudo mount --bind /dev /mnt/jb-root/dev
           sudo mount --bind /proc /mnt/jb-root/proc
           sudo mount --bind /sys /mnt/jb-root/sys
-          sudo mkdir -p /mnt/jb-root/boot/firmware
-          sudo mount --bind /mnt/jb-boot /mnt/jb-root/boot/firmware
+          if [ "$BOARD" = "pi4" ]; then
+            sudo mkdir -p /mnt/jb-root/boot/firmware
+            sudo mount --bind /mnt/jb-boot /mnt/jb-root/boot/firmware
+          fi
           sudo mkdir -p /mnt/jb-root/root/Jellyby
           git archive HEAD | sudo tar -x -C /mnt/jb-root/root/Jellyby
-          sudo chroot /mnt/jb-root /usr/bin/qemu-aarch64-static /bin/bash -c \
-            "cd /root/Jellyby && JELLYBY_OFFLINE=1 ./setup.sh"
-          sudo umount /mnt/jb-root/boot/firmware
-          sudo rm -rf /mnt/jb-root/root/Jellyby /mnt/jb-root/usr/bin/qemu-aarch64-static
-          sudo sync
+          sudo chroot /mnt/jb-root /usr/bin/qemu-aarch64-static /usr/bin/env \
+            JELLYBY_OFFLINE=1 JELLYBY_BOARD="$BOARD" JELLYBY_MPV_DEBS="$MPV_DEBS" \
+            /bin/bash -c "cd /root/Jellyby && ./setup.sh"
+          if [ "$BOARD" = "pi4" ]; then
+            sudo umount /mnt/jb-root/boot/firmware
+          fi
 
-      - name: Unmount image
+      - name: Default user + skip Armbian first-login wizard (zero3)
+        if: matrix.board == 'zero3'
         run: |
+          # Same login as the Pi image: pi / jellyby (change it). Armbian's
+          # interactive first-login wizard would otherwise block a headless
+          # appliance; its default root password is locked instead.
+          sudo chroot /mnt/jb-root /usr/bin/qemu-aarch64-static /bin/bash -c '
+            set -e
+            id pi >/dev/null 2>&1 || useradd --create-home --shell /bin/bash pi
+            usermod -aG sudo,video,audio pi
+            echo "pi:jellyby" | chpasswd
+            passwd -l root
+            rm -f /root/.not_logged_in_yet
+          '
+
+      - name: Clean up chroot and unmount image
+        run: |
+          sudo rm -rf /mnt/jb-root/root/Jellyby /mnt/jb-root/usr/bin/qemu-aarch64-static
+          sudo rm -f /mnt/jb-root/etc/resolv.conf
+          if sudo test -e /mnt/jb-root/etc/resolv.conf.jellyby-orig || sudo test -L /mnt/jb-root/etc/resolv.conf.jellyby-orig; then
+            sudo mv /mnt/jb-root/etc/resolv.conf.jellyby-orig /mnt/jb-root/etc/resolv.conf
+          fi
+          sudo sync
           sudo umount /mnt/jb-root/dev /mnt/jb-root/proc /mnt/jb-root/sys
-          sudo umount /mnt/jb-root /mnt/jb-boot
+          sudo umount /mnt/jb-root
+          if [ "$BOARD" = "pi4" ]; then sudo umount /mnt/jb-boot; fi
           sudo losetup -d "$LOOP"
 
       - name: Shrink image with pishrink (auto-expand on first boot), fallback to unshrunk
         run: |
           curl -fL -o pishrink.sh https://raw.githubusercontent.com/Drewsif/PiShrink/master/pishrink.sh
-          if ! sudo bash pishrink.sh base.img jellyby-pi4.img; then
+          if ! sudo bash pishrink.sh base.img "$OUT_IMG"; then
             echo "pishrink failed, using unshrunk image"
-            cp base.img jellyby-pi4.img
+            cp base.img "$OUT_IMG"
           fi
-          xz -T0 -9 -k jellyby-pi4.img
-          ls -lh jellyby-pi4.img.xz
+          xz -T0 -9 -k "$OUT_IMG"
+          ls -lh "$OUT_IMG.xz"
 
       - name: Free disk space (the PINN packaging below loop-mounts the image)
         run: |
@@ -97,13 +167,14 @@ jobs:
           df -h /
 
       - name: Hard image checks (no boot; these gate the release)
-        run: sudo bash scripts/check-image.sh jellyby-pi4.img
+        run: sudo bash scripts/check-image.sh "$OUT_IMG" "$BOARD"
 
       - name: Package PINN repository assets (os_list_v3.json + partition tarballs)
+        if: matrix.board == 'pi4'
         run: |
           mkdir -p pinn-out
           sudo mkdir -p /mnt/pb /mnt/pr
-          LOOP2=$(sudo losetup -fP --show jellyby-pi4.img)
+          LOOP2=$(sudo losetup -fP --show "$OUT_IMG")
           sudo mount "${LOOP2}p1" /mnt/pb
           sudo mount "${LOOP2}p2" /mnt/pr
           BOOT_MIB=$(sudo du -sm /mnt/pb | cut -f1)
@@ -126,6 +197,7 @@ jobs:
           ls -lh pinn-out
 
       - name: Generate Raspberry Pi Imager custom-repo JSON
+        if: matrix.board == 'pi4'
         run: |
           SIZE=$(stat -c%s jellyby-pi4.img.xz)
           SHA=$(sha256sum jellyby-pi4.img.xz | cut -d' ' -f1)
@@ -154,14 +226,28 @@ jobs:
             json.dump(doc, f, indent=2)
           PY
 
-      - name: Publish GitHub Release
+      - name: Checksum (zero3)
+        if: matrix.board == 'zero3'
+        run: sha256sum "$OUT_IMG.xz" > "$OUT_IMG.xz.sha256"
+
+      - name: Publish GitHub Release (pi4)
+        if: matrix.board == 'pi4'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name }}
-          name: Jellyby Pi 4 image (run ${{ github.run_number }})
           make_latest: true
           fail_on_unmatched_files: true
           files: |
             jellyby-pi4.img.xz
             jellyby-imager.json
             pinn-out/*
+
+      - name: Publish GitHub Release (zero3)
+        if: matrix.board == 'zero3'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          fail_on_unmatched_files: true
+          files: |
+            jellyby-zero3.img.xz
+            jellyby-zero3.img.xz.sha256

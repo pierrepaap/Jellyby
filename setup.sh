@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 #
-# Jellyby setup: turn a fresh Raspberry Pi OS Lite (64-bit) into the Jellyby
-# appliance (kiosk media launcher + CEC remote + readsb).
+# Jellyby setup: turn a fresh Raspberry Pi OS Lite (64-bit) or Armbian
+# (Radxa ZERO 3E/3W, vendor kernel) into the Jellyby appliance (kiosk media
+# launcher + CEC remote + readsb).
 #
-# Usage on the Pi:
+# Board: auto-detected from the device tree; override with
+#   JELLYBY_BOARD=pi4|zero3   (required in CI chroot builds)
+# zero3 only: JELLYBY_MPV_DEBS="<url or path> ..." installs an MPP-enabled
+#   mpv/ffmpeg build (.debs) instead of Debian's mpv, which cannot use the
+#   RK3566 hardware decoder.
+#
+# Usage on the board:
 #   git clone https://github.com/pierrepaap/Jellyby.git
 #   cd Jellyby
 #   sudo ./setup.sh
@@ -20,10 +27,28 @@ fi
 
 # JELLYBY_OFFLINE=1: running inside a chroot (image build in CI). Skip the
 # hardware check, hostnamectl and "systemctl enable --now" (no systemd running).
-if [[ "${JELLYBY_OFFLINE:-0}" != "1" ]] && ! grep -qi raspberry /proc/device-tree/model 2>/dev/null && ! grep -qi raspberry /proc/cpuinfo 2>/dev/null; then
-  read -r -p "This does not look like a Raspberry Pi. Proceed anyway? [y/N] " ans
-  [[ "$ans" =~ ^[Yy]$ ]] || exit 1
+detect_board() {
+  local model
+  model="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || true)"
+  case "$model" in
+    *"Raspberry Pi"*)          echo pi4 ;;
+    *"Radxa ZERO 3"*|*"Radxa Zero 3"*) echo zero3 ;;
+    *) grep -qi raspberry /proc/cpuinfo 2>/dev/null && echo pi4 || echo unknown ;;
+  esac
+}
+BOARD="${JELLYBY_BOARD:-}"
+if [[ -z "$BOARD" ]]; then
+  if [[ "${JELLYBY_OFFLINE:-0}" == "1" ]]; then
+    echo "JELLYBY_OFFLINE=1 needs JELLYBY_BOARD=pi4|zero3"; exit 1
+  fi
+  BOARD="$(detect_board)"
+  if [[ "$BOARD" == "unknown" ]]; then
+    read -r -p "Unknown board. Set up as Raspberry Pi 4 (pi4) or Radxa ZERO 3 (zero3)? [pi4/zero3/N] " ans
+    case "$ans" in pi4|zero3) BOARD="$ans" ;; *) exit 1 ;; esac
+  fi
 fi
+case "$BOARD" in pi4|zero3) ;; *) echo "unsupported JELLYBY_BOARD: $BOARD"; exit 1 ;; esac
+echo "==> Board: $BOARD"
 
 echo "==> Updating package lists"
 export DEBIAN_FRONTEND=noninteractive
@@ -41,7 +66,7 @@ apt-get install -y \
   xserver-xorg xserver-xorg-input-libinput xserver-xorg-video-fbdev \
   openssh-server sudo \
   git make gcc pkg-config \
-  libcec-dev cec-utils \
+  libcec-dev cec-utils v4l-utils \
   libusb-1.0-0-dev librtlsdr-dev libncurses-dev zlib1g-dev libzstd-dev \
   python3
 
@@ -56,12 +81,35 @@ if [[ "${JELLYBY_THEATER:-0}" == "1" ]]; then
     && dpkg -i /tmp/emby-theater.deb || echo "Emby Theater .deb install failed; mpv remains the player" >&2
 fi
 
+if [[ "$BOARD" == "zero3" ]]; then
+  # Debian's mpv/ffmpeg have no Rockchip MPP support: without an MPP-enabled
+  # build, playback works but decodes in software (too slow for 4K/HEVC).
+  if [[ -n "${JELLYBY_MPV_DEBS:-}" ]]; then
+    echo "==> Installing MPP-enabled mpv/ffmpeg packages"
+    debs=()
+    for src in $JELLYBY_MPV_DEBS; do
+      if [[ "$src" == http* ]]; then
+        f="/tmp/$(basename "$src")"; curl -fL -o "$f" "$src"; debs+=("$f")
+      else
+        debs+=("$src")
+      fi
+    done
+    apt-get install -y "${debs[@]}"
+  else
+    echo "WARNING: JELLYBY_MPV_DEBS not set — Debian mpv has no Rockchip MPP hwdec;" >&2
+    echo "         video will decode in software until an MPP-enabled mpv is installed." >&2
+  fi
+fi
+
 echo "==> Creating kiosk user 'media'"
 if ! id media >/dev/null 2>&1; then
   useradd --create-home --shell /bin/bash media
 fi
-# mpv needs the GPU (renderD128) and the rpivid V4L2 decoder nodes (video group)
+# mpv needs the GPU (renderD128) and the hardware decoder nodes: rpivid V4L2
+# on the Pi, /dev/mpp_service + /dev/rga + /dev/dma_heap on Rockchip (the udev
+# rule installed below puts those in the video group).
 usermod -aG video,audio media
+getent group render >/dev/null && usermod -aG render media
 
 echo "==> Installing Jellyby files"
 install -d /etc/jellyby /opt/jellyby/www /usr/local/bin
@@ -75,6 +123,15 @@ install -d /etc/jellyby /opt/jellyby/www /usr/local/bin
 [[ -f /etc/jellyby/players.json ]]   || install -m 600 -o media -g media "$FILES/etc/jellyby/players.json" /etc/jellyby/players.json
 
 cp -r "$FILES/opt/jellyby/." /opt/jellyby/
+# Board-specific bits: mpv hwdec profile (included by mpv.conf as ~~/board.conf)
+# and /etc/jellyby/board (read by kiosk.sh and the image checks).
+install -m 644 "$FILES/opt/jellyby/mpv/board-$BOARD.conf" /opt/jellyby/mpv/board.conf
+echo "$BOARD" > /etc/jellyby/board
+chmod 644 /etc/jellyby/board
+if [[ "$BOARD" == "zero3" ]]; then
+  install -d /etc/udev/rules.d
+  install -m 644 "$FILES/etc/udev/rules.d/99-jellyby-rockchip.rules" /etc/udev/rules.d/99-jellyby-rockchip.rules
+fi
 chmod 755 /opt/jellyby/kiosk.sh /opt/jellyby/server.py /opt/jellyby/play.sh /opt/jellyby/resolve_stream.py /opt/jellyby/netapply.sh
 
 install -m 755 "$FILES/usr/local/bin/readsb-wrapper.sh" /usr/local/bin/readsb-wrapper
@@ -123,15 +180,30 @@ ensure_boot_config() {
     fi
   done
 }
-BOOT_DIR="${JELLYBY_BOOT_DIR:-}"
-if [[ -z "$BOOT_DIR" ]]; then
-  for d in /boot/firmware /boot; do
-    [[ -d "$d" ]] && BOOT_DIR="$d" && break
-  done
-fi
-if [[ -n "$BOOT_DIR" ]]; then
-  echo "==> Ensuring boot config in $BOOT_DIR/config.txt"
-  ensure_boot_config "$BOOT_DIR/config.txt"
+if [[ "$BOARD" == "pi4" ]]; then
+  BOOT_DIR="${JELLYBY_BOOT_DIR:-}"
+  if [[ -z "$BOOT_DIR" ]]; then
+    for d in /boot/firmware /boot; do
+      [[ -d "$d" ]] && BOOT_DIR="$d" && break
+    done
+  fi
+  if [[ -n "$BOOT_DIR" ]]; then
+    echo "==> Ensuring boot config in $BOOT_DIR/config.txt"
+    ensure_boot_config "$BOOT_DIR/config.txt"
+  fi
+else
+  # Armbian (Rockchip): no config.txt. The vendor kernel's DT already enables
+  # HDMI, the GPU and the MPP/RGA decoders. If /dev/cec0 is missing on the
+  # board, a CEC overlay goes into /boot/armbianEnv.txt ("overlays=...").
+  echo "==> Armbian boot config left as shipped (/boot/armbianEnv.txt)"
+  # Keep the vendor kernel: an upgrade to a kernel without MPP would silently
+  # drop hardware decode.
+  if [[ "${JELLYBY_HOLD_KERNEL:-1}" == "1" ]]; then
+    mapfile -t kpkgs < <( (dpkg-query -W -f='${db:Status-Abbrev}|${Package}\n' 'linux-image-*' 'linux-dtb-*' 2>/dev/null || true) | awk -F'|' '$1 ~ /^ii/ {print $2}')
+    if [[ ${#kpkgs[@]} -gt 0 ]]; then
+      apt-mark hold "${kpkgs[@]}"
+    fi
+  fi
 fi
 
 if [[ "${JELLYBY_OFFLINE:-0}" != "1" ]]; then
@@ -158,7 +230,7 @@ else
   echo "  - Reboot now (sudo reboot) to enter the kiosk: the launcher appears on HDMI."
   echo "  - Navigate with your projector remote (HDMI-CEC). Menu key = settings."
   echo "  - Add/edit your Emby / Jellyfin / Plex servers in the on-screen settings."
-  echo "    Jellyfin/Emby tiles play natively in MPV (Pi 4 HEVC hwdec); Plex/browser tiles open in Chromium."
+  echo "    Jellyfin/Emby tiles play natively in MPV (hardware HEVC decode); Plex/browser tiles open in Chromium."
   echo "  - Media server credentials for MPV: /etc/jellyby/players.json (media:media 0600)."
   echo "  - Network (static/DHCP): Settings in the launcher, or over SSH:"
   echo "    sudo /opt/jellyby/netapply.sh eth0 dhcp   # revert escape hatch"

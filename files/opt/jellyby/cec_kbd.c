@@ -365,9 +365,18 @@ int main(int argc, char **argv) {
 
   cec_adapter_descriptor adapters[8];
   int8_t n = libcec_detect_adapters(conn, adapters, 8, NULL, 0);
-  const char *port = "RPI";
-  if (n > 0)
-    port = adapters[0].strComPath;
+  /* Port choice: $CEC_KBD_PORT override, else the first detected adapter,
+   * else the kernel CEC device (/dev/cec0: Pi 4 under vc4-kms, Rockchip
+   * dw-hdmi), else libcec's legacy Raspberry Pi firmware adapter. */
+  const char *port = getenv("CEC_KBD_PORT");
+  if (!port || !*port) {
+    if (n > 0)
+      port = adapters[0].strComPath;
+    else if (access("/dev/cec0", F_OK) == 0)
+      port = "/dev/cec0";
+    else
+      port = "RPI";
+  }
   fprintf(stderr, "cec-kbd: %d CEC adapter(s) found, opening '%s'\n", n, port);
   if (!libcec_open(conn, port, CEC_DEFAULT_CONNECT_TIMEOUT)) {
     fprintf(stderr, "cec-kbd: libcec_open('%s') failed\n", port);
