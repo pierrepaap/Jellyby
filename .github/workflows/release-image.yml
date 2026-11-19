@@ -84,6 +84,7 @@ jobs:
           truncate -s +8G base.img
           LOOP=$(sudo losetup -fP --show base.img)
           echo "LOOP=$LOOP" >> "$GITHUB_ENV"
+          sudo udevadm settle
           sudo growpart "$LOOP" "$ROOT_PART"
           sudo partprobe "$LOOP"
           sudo e2fsck -fy "${LOOP}p${ROOT_PART}"
@@ -184,6 +185,8 @@ jobs:
           mkdir -p pinn-out
           sudo mkdir -p /mnt/pb /mnt/pr
           LOOP2=$(sudo losetup -fP --show "$OUT_IMG")
+          sudo partprobe "$LOOP2"; sudo udevadm settle
+          for _ in $(seq 1 20); do [ -b "${LOOP2}p2" ] && break; sleep 0.5; done
           sudo mount "${LOOP2}p1" /mnt/pb
           sudo mount "${LOOP2}p2" /mnt/pr
           BOOT_MIB=$(sudo du -sm /mnt/pb | cut -f1)

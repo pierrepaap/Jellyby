@@ -17,6 +17,14 @@ BOARD="${2:-pi4}"
 case "$BOARD" in pi4|zero3) ;; *) echo "unknown board: $BOARD"; exit 1 ;; esac
 
 LOOP=$(sudo losetup -fP --show "$IMG")
+# The partition nodes (${LOOP}p1, p2) appear asynchronously: wait for them,
+# or the mount below races and fails with "special device does not exist".
+sudo partprobe "$LOOP" 2>/dev/null || true
+sudo udevadm settle 2>/dev/null || true
+for _ in $(seq 1 20); do
+  [ -b "${LOOP}p1" ] && break
+  sleep 0.5
+done
 MNT=$(mktemp -d /tmp/jellyby-check.XXXXXX)
 cleanup() {
   sudo umount "$MNT/boot/firmware" 2>/dev/null || true
