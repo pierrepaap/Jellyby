@@ -57,6 +57,7 @@ if [ "$BOARD" = "pi4" ]; then
   check "boot config has max_framebuffers=2" sudo grep -q 'max_framebuffers=2' "$CFG"
   check "boot config has disable_splash=1"  sudo grep -q 'disable_splash=1' "$CFG"
   check "kernel cmdline has root="           sudo grep -q 'root=' "$MNT/boot/firmware/cmdline.txt"
+  check "HDMI audio default (asound.conf)"  sudo grep -q 'vc4hdmi0' "$MNT/etc/asound.conf"
   check "SSH enabled at first boot"         sudo test -f "$MNT/boot/firmware/ssh"
   check "default user configured"           sudo test -f "$MNT/boot/firmware/userconf.txt"
 else
@@ -73,6 +74,10 @@ for f in \
   /usr/local/bin/readsb \
   /usr/local/bin/readsb-wrapper \
   /usr/bin/mpv \
+  /usr/bin/openbox \
+  /usr/bin/xset \
+  /usr/local/share/jellyby/readsb-rtlsdr \
+  /etc/modprobe.d/jellyby-rtlsdr.conf \
   /opt/jellyby/server.py \
   /opt/jellyby/kiosk.sh \
   /opt/jellyby/play.sh \
@@ -105,6 +110,9 @@ check "media user in audio group" sudo grep -Eq "^audio:[^:]*:[^:]*:([^,]*,)?med
 MEDIA_UID=$(sudo sed -n 's/^media:[^:]*:\([0-9]*\):.*/\1/p' "$MNT/etc/passwd")
 MEDIA_GID=$(sudo sed -n 's/^media:[^:]*:\([0-9]*\):.*/\1/p' "$MNT/etc/group")
 check "media user exists" test -n "$MEDIA_UID"
+check "media user is not UID 1000 (Pi userconf renames UID 1000)" test "$MEDIA_UID" != "1000"
+check "/etc/jellyby owned by media (launcher saves settings)" test "$(sudo stat -c '%u' "$MNT/etc/jellyby")" = "$MEDIA_UID"
+check "cec-kbd does not need libcec" sudo sh -c "! grep -q libcec '$MNT/usr/local/bin/cec-kbd'"
 check "players.json is media:media 0600" test "$(sudo stat -c '%u %g %a' "$MNT/etc/jellyby/players.json")" = "$MEDIA_UID $MEDIA_GID 600"
 check "sudoers syntax valid" sudo visudo -cf "$MNT/etc/sudoers.d/jellyby"
 check "apps.json is valid JSON" sudo python3 -m json.tool "$MNT/etc/jellyby/apps.json"

@@ -17,13 +17,22 @@ name: release-image
 #   ZERO3_MPV_DEBS        space-separated URLs of MPP-enabled mpv/ffmpeg .debs;
 #                         without them the zero3 image decodes video in software
 #
-# Single trigger: publishing a release (Releases -> New release -> Publish).
-# The lint workflow still runs on every PR/push and gates merges; image builds
-# are deliberately release-driven so each image maps to a versioned release.
+# Triggers:
+#   - publishing a release (Releases -> New release -> Publish): builds and
+#     attaches the images to that release;
+#   - "Run workflow" (Actions tab -> release-image): builds the images from the
+#     chosen branch WITHOUT publishing anything — they are downloadable as
+#     workflow artifacts for a test flash.
+# The lint workflow still runs on every PR/push and gates merges.
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+  push:
+    # TEMPORARY: lets this branch run the full build before workflow_dispatch
+    # exists on the default branch. Remove once merged.
+    branches: [claude/magical-hamilton-lt5dy4]
 
 permissions:
   contents: write
@@ -190,7 +199,7 @@ jobs:
             --boot-mib "$BOOT_MIB" --root-mib "$ROOT_MIB" \
             --base-url "https://github.com/pierrepaap/Jellyby/releases/latest/download" \
             --date "$(date -u +%Y-%m-%d)" \
-            --version "${{ github.event.release.tag_name }}"
+            --version "${{ github.event.release.tag_name || 'test' }}"
           cp pinn/partition_setup.sh pinn-out/
           cp pinn/Jellyby.png pinn-out/
           cp pinn/marketing.tar pinn-out/
@@ -230,8 +239,20 @@ jobs:
         if: matrix.board == 'zero3'
         run: sha256sum "$OUT_IMG.xz" > "$OUT_IMG.xz.sha256"
 
+      - name: Upload test build as workflow artifact (no release)
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jellyby-${{ matrix.board }}-image
+          compression-level: 0
+          retention-days: 14
+          path: |
+            jellyby-${{ matrix.board }}.img.xz
+            jellyby-zero3.img.xz.sha256
+            jellyby-imager.json
+
       - name: Publish GitHub Release (pi4)
-        if: matrix.board == 'pi4'
+        if: github.event_name == 'release' && matrix.board == 'pi4'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name }}
@@ -243,7 +264,7 @@ jobs:
             pinn-out/*
 
       - name: Publish GitHub Release (zero3)
-        if: matrix.board == 'zero3'
+        if: github.event_name == 'release' && matrix.board == 'zero3'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name }}

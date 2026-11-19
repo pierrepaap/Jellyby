@@ -1,19 +1,32 @@
 /*
  * cec-kbd: translate HDMI-CEC remote key presses into Linux keyboard events.
  *
- * Uses libcec (C API) to listen for user-control key presses from the TV /
- * projector remote and re-injects them through /dev/uinput so that any
- * application (here: the Chromium kiosk) receives them as normal keyboard
- * input. Key mapping is read from a simple config file, e.g.:
+ * Talks to the kernel CEC framework directly (/dev/cecN, <linux/cec.h>) — the
+ * interface behind HDMI-CEC on the Raspberry Pi 4 under vc4-kms and on
+ * Rockchip dw-hdmi (Radxa ZERO 3). No libcec: distro libcec builds often lack
+ * the Linux CEC adapter, which would leave the remote dead.
+ *
+ * It claims a Playback logical address ("Jellyby") on every CEC adapter it
+ * finds (the Pi 4 has one per HDMI port), answers the few messages TVs use to
+ * decide where to route remote keys (power status, menu request, active
+ * source / stream path), and re-injects User Control Pressed keys through
+ * /dev/uinput so the kiosk browser and mpv see normal keyboard input.
+ *
+ * Key mapping is read from a simple config file, e.g.:
  *
  *   select = enter
  *   exit   = ctrl+w
  *
- * Build: gcc -O2 -o cec-kbd cec_kbd.c $(pkg-config --cflags --libs libcec)
+ * Usage: cec-kbd [keymap.conf] [/dev/cecN ...]
+ *   Devices default to $CEC_KBD_PORT (space-separated) or all of /dev/cec0-3.
+ *   CEC_KBD_ACTIVATE=1: wake the TV and switch it to this input at start.
+ *
+ * Build: gcc -O2 -Wall -o cec-kbd cec_kbd.c   (kernel headers only)
  */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -22,25 +35,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <linux/cec.h>
 #include <linux/input-event-codes.h>
 #include <linux/uinput.h>
-
-/* header layout differs by distro: Debian/Raspberry Pi OS uses
- * /usr/include/cec/, Ubuntu uses /usr/include/libcec/, and pkg-config may
- * point directly at the header dir */
-#if defined(__has_include)
-#  if __has_include(<cec/cecc.h>)
-#    include <cec/cecc.h>
-#  elif __has_include(<libcec/cecc.h>)
-#    include <libcec/cecc.h>
-#  elif __has_include(<cecc.h>)
-#    include <cecc.h>
-#  else
-#    error "libcec headers not found (install libcec-dev)"
-#  endif
-#else
-#  include <cecc.h>
-#endif
 
 struct key_name {
   const char *name;
@@ -83,92 +80,94 @@ static const struct key_name MOD_NAMES[] = {
 
 struct cec_name {
   const char *name;
-  cec_user_control_code code;
+  uint8_t code;
 };
 
+/* HDMI-CEC "UI command" codes (CEC 1.4 table 27); names match libcec's so
+ * existing keymaps keep working. */
 static const struct cec_name CEC_NAMES[] = {
-  {"select", CEC_USER_CONTROL_CODE_SELECT},
-  {"up", CEC_USER_CONTROL_CODE_UP},
-  {"down", CEC_USER_CONTROL_CODE_DOWN},
-  {"left", CEC_USER_CONTROL_CODE_LEFT},
-  {"right", CEC_USER_CONTROL_CODE_RIGHT},
-  {"right_up", CEC_USER_CONTROL_CODE_RIGHT_UP},
-  {"right_down", CEC_USER_CONTROL_CODE_RIGHT_DOWN},
-  {"left_up", CEC_USER_CONTROL_CODE_LEFT_UP},
-  {"left_down", CEC_USER_CONTROL_CODE_LEFT_DOWN},
-  {"root_menu", CEC_USER_CONTROL_CODE_ROOT_MENU},
-  {"setup_menu", CEC_USER_CONTROL_CODE_SETUP_MENU},
-  {"contents_menu", CEC_USER_CONTROL_CODE_CONTENTS_MENU},
-  {"favorite_menu", CEC_USER_CONTROL_CODE_FAVORITE_MENU},
-  {"exit", CEC_USER_CONTROL_CODE_EXIT},
-  {"top_menu", CEC_USER_CONTROL_CODE_TOP_MENU},
-  {"dvd_menu", CEC_USER_CONTROL_CODE_DVD_MENU},
-  {"number_entry_mode", CEC_USER_CONTROL_CODE_NUMBER_ENTRY_MODE},
-  {"number0", CEC_USER_CONTROL_CODE_NUMBER0},
-  {"number1", CEC_USER_CONTROL_CODE_NUMBER1},
-  {"number2", CEC_USER_CONTROL_CODE_NUMBER2},
-  {"number3", CEC_USER_CONTROL_CODE_NUMBER3},
-  {"number4", CEC_USER_CONTROL_CODE_NUMBER4},
-  {"number5", CEC_USER_CONTROL_CODE_NUMBER5},
-  {"number6", CEC_USER_CONTROL_CODE_NUMBER6},
-  {"number7", CEC_USER_CONTROL_CODE_NUMBER7},
-  {"number8", CEC_USER_CONTROL_CODE_NUMBER8},
-  {"number9", CEC_USER_CONTROL_CODE_NUMBER9},
-  {"number11", CEC_USER_CONTROL_CODE_NUMBER11},
-  {"number12", CEC_USER_CONTROL_CODE_NUMBER12},
-  {"dot", CEC_USER_CONTROL_CODE_DOT},
-  {"enter", CEC_USER_CONTROL_CODE_ENTER},
-  {"clear", CEC_USER_CONTROL_CODE_CLEAR},
-  {"next_favorite", CEC_USER_CONTROL_CODE_NEXT_FAVORITE},
-  {"channel_up", CEC_USER_CONTROL_CODE_CHANNEL_UP},
-  {"channel_down", CEC_USER_CONTROL_CODE_CHANNEL_DOWN},
-  {"previous_channel", CEC_USER_CONTROL_CODE_PREVIOUS_CHANNEL},
-  {"sound_select", CEC_USER_CONTROL_CODE_SOUND_SELECT},
-  {"input_select", CEC_USER_CONTROL_CODE_INPUT_SELECT},
-  {"display_information", CEC_USER_CONTROL_CODE_DISPLAY_INFORMATION},
-  {"help", CEC_USER_CONTROL_CODE_HELP},
-  {"page_up", CEC_USER_CONTROL_CODE_PAGE_UP},
-  {"page_down", CEC_USER_CONTROL_CODE_PAGE_DOWN},
-  {"power", CEC_USER_CONTROL_CODE_POWER},
-  {"volume_up", CEC_USER_CONTROL_CODE_VOLUME_UP},
-  {"volume_down", CEC_USER_CONTROL_CODE_VOLUME_DOWN},
-  {"mute", CEC_USER_CONTROL_CODE_MUTE},
-  {"play", CEC_USER_CONTROL_CODE_PLAY},
-  {"stop", CEC_USER_CONTROL_CODE_STOP},
-  {"pause", CEC_USER_CONTROL_CODE_PAUSE},
-  {"record", CEC_USER_CONTROL_CODE_RECORD},
-  {"rewind", CEC_USER_CONTROL_CODE_REWIND},
-  {"fast_forward", CEC_USER_CONTROL_CODE_FAST_FORWARD},
-  {"eject", CEC_USER_CONTROL_CODE_EJECT},
-  {"forward", CEC_USER_CONTROL_CODE_FORWARD},
-  {"backward", CEC_USER_CONTROL_CODE_BACKWARD},
-  {"stop_record", CEC_USER_CONTROL_CODE_STOP_RECORD},
-  {"pause_record", CEC_USER_CONTROL_CODE_PAUSE_RECORD},
-  {"angle", CEC_USER_CONTROL_CODE_ANGLE},
-  {"sub_picture", CEC_USER_CONTROL_CODE_SUB_PICTURE},
-  {"video_on_demand", CEC_USER_CONTROL_CODE_VIDEO_ON_DEMAND},
-  {"epg", CEC_USER_CONTROL_CODE_ELECTRONIC_PROGRAM_GUIDE},
-  {"timer_programming", CEC_USER_CONTROL_CODE_TIMER_PROGRAMMING},
-  {"initial_configuration", CEC_USER_CONTROL_CODE_INITIAL_CONFIGURATION},
-  {"play_function", CEC_USER_CONTROL_CODE_PLAY_FUNCTION},
-  {"pause_play_function", CEC_USER_CONTROL_CODE_PAUSE_PLAY_FUNCTION},
-  {"stop_function", CEC_USER_CONTROL_CODE_STOP_FUNCTION},
-  {"mute_function", CEC_USER_CONTROL_CODE_MUTE_FUNCTION},
-  {"power_toggle_function", CEC_USER_CONTROL_CODE_POWER_TOGGLE_FUNCTION},
-  {"power_off_function", CEC_USER_CONTROL_CODE_POWER_OFF_FUNCTION},
-  {"power_on_function", CEC_USER_CONTROL_CODE_POWER_ON_FUNCTION},
-  {"f1_blue", CEC_USER_CONTROL_CODE_F1_BLUE},
-  {"f2_red", CEC_USER_CONTROL_CODE_F2_RED},
-  {"f3_green", CEC_USER_CONTROL_CODE_F3_GREEN},
-  {"f4_yellow", CEC_USER_CONTROL_CODE_F4_YELLOW},
-  {"f5", CEC_USER_CONTROL_CODE_F5},
-  {"an_return", CEC_USER_CONTROL_CODE_AN_RETURN},
-  {"an_channels_list", CEC_USER_CONTROL_CODE_AN_CHANNELS_LIST},
+  {"select", 0x00},
+  {"up", 0x01},
+  {"down", 0x02},
+  {"left", 0x03},
+  {"right", 0x04},
+  {"right_up", 0x05},
+  {"right_down", 0x06},
+  {"left_up", 0x07},
+  {"left_down", 0x08},
+  {"root_menu", 0x09},
+  {"setup_menu", 0x0a},
+  {"contents_menu", 0x0b},
+  {"favorite_menu", 0x0c},
+  {"exit", 0x0d},
+  {"top_menu", 0x10},
+  {"dvd_menu", 0x11},
+  {"number_entry_mode", 0x1d},
+  {"number0", 0x20},
+  {"number1", 0x21},
+  {"number2", 0x22},
+  {"number3", 0x23},
+  {"number4", 0x24},
+  {"number5", 0x25},
+  {"number6", 0x26},
+  {"number7", 0x27},
+  {"number8", 0x28},
+  {"number9", 0x29},
+  {"number11", 0x1e},
+  {"number12", 0x1f},
+  {"dot", 0x2a},
+  {"enter", 0x2b},
+  {"clear", 0x2c},
+  {"next_favorite", 0x2f},
+  {"channel_up", 0x30},
+  {"channel_down", 0x31},
+  {"previous_channel", 0x32},
+  {"sound_select", 0x33},
+  {"input_select", 0x34},
+  {"display_information", 0x35},
+  {"help", 0x36},
+  {"page_up", 0x37},
+  {"page_down", 0x38},
+  {"power", 0x40},
+  {"volume_up", 0x41},
+  {"volume_down", 0x42},
+  {"mute", 0x43},
+  {"play", 0x44},
+  {"stop", 0x45},
+  {"pause", 0x46},
+  {"record", 0x47},
+  {"rewind", 0x48},
+  {"fast_forward", 0x49},
+  {"eject", 0x4a},
+  {"forward", 0x4b},
+  {"backward", 0x4c},
+  {"stop_record", 0x4d},
+  {"pause_record", 0x4e},
+  {"angle", 0x50},
+  {"sub_picture", 0x51},
+  {"video_on_demand", 0x52},
+  {"epg", 0x53},
+  {"timer_programming", 0x54},
+  {"initial_configuration", 0x55},
+  {"play_function", 0x60},
+  {"pause_play_function", 0x61},
+  {"stop_function", 0x64},
+  {"mute_function", 0x65},
+  {"power_toggle_function", 0x6b},
+  {"power_off_function", 0x6c},
+  {"power_on_function", 0x6d},
+  {"f1_blue", 0x71},
+  {"f2_red", 0x72},
+  {"f3_green", 0x73},
+  {"f4_yellow", 0x74},
+  {"f5", 0x75},
+  {"an_return", 0x91},
+  {"an_channels_list", 0x96},
 };
 
 #define MAX_MAP 128
 struct mapping {
-  cec_user_control_code code;
+  uint8_t code;
   char spec[64];
 };
 static struct mapping g_map[MAX_MAP];
@@ -209,20 +208,20 @@ static int load_keymap(const char *path) {
     while (p > spec && (p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\n' || p[-1] == '\r')) *--p = '\0';
     if (!*name || !*spec)
       continue;
-    cec_user_control_code code = CEC_USER_CONTROL_CODE_UNKNOWN;
+    int code = -1;
     size_t n = sizeof CEC_NAMES / sizeof CEC_NAMES[0];
     for (size_t i = 0; i < n; i++)
       if (strcmp(CEC_NAMES[i].name, name) == 0) {
         code = CEC_NAMES[i].code;
         break;
       }
-    if (code == CEC_USER_CONTROL_CODE_UNKNOWN) {
+    if (code < 0) {
       fprintf(stderr, "cec-kbd: unknown CEC button name '%s' in %s\n", name, path);
       continue;
     }
     if (g_map_len >= MAX_MAP)
       break;
-    g_map[g_map_len].code = code;
+    g_map[g_map_len].code = (uint8_t)code;
     snprintf(g_map[g_map_len].spec, sizeof g_map[g_map_len].spec, "%s", spec);
     g_map_len++;
   }
@@ -230,7 +229,7 @@ static int load_keymap(const char *path) {
   return g_map_len > 0 ? 0 : -1;
 }
 
-static const char *find_spec(cec_user_control_code code) {
+static const char *find_spec(uint8_t code) {
   for (int i = 0; i < g_map_len; i++)
     if (g_map[i].code == code)
       return g_map[i].spec;
@@ -311,26 +310,195 @@ fail:
   return -1;
 }
 
-static void on_key(void *cbparam, const cec_keypress *key) {
-  (void)cbparam;
-  if (!key)
+/* ---------------------------------------------------------------- CEC -- */
+
+#define MAX_ADAPTERS 4
+#define OP_FEATURE_ABORT          0x00
+#define OP_IMAGE_VIEW_ON          0x04
+#define OP_USER_CONTROL_PRESSED   0x44
+#define OP_USER_CONTROL_RELEASED  0x45
+#define OP_GIVE_OSD_NAME          0x46
+#define OP_SET_OSD_NAME           0x47
+#define OP_ROUTING_CHANGE         0x80
+#define OP_ROUTING_INFORMATION    0x81
+#define OP_ACTIVE_SOURCE          0x82
+#define OP_REQUEST_ACTIVE_SOURCE  0x85
+#define OP_SET_STREAM_PATH        0x86
+#define OP_MENU_REQUEST           0x8D
+#define OP_MENU_STATUS            0x8E
+#define OP_GIVE_POWER_STATUS      0x8F
+#define OP_REPORT_POWER_STATUS    0x90
+#define LA_TV        0x0
+#define LA_BROADCAST 0xF
+
+struct adapter {
+  int fd;
+  char path[32];
+  uint16_t pa;       /* physical address, CEC_PHYS_ADDR_INVALID if unplugged */
+  uint8_t la;        /* our logical address, CEC_LOG_ADDR_INVALID until claimed */
+  bool active;       /* we believe we are the active source on this link */
+  bool activated;    /* CEC_KBD_ACTIVATE already done for this PA */
+};
+
+static struct adapter g_ad[MAX_ADAPTERS];
+static int g_nad;
+static bool g_activate;
+
+static void cec_send(struct adapter *a, uint8_t to, const uint8_t *data, int len) {
+  if (a->la == CEC_LOG_ADDR_INVALID || len < 1 || len > 15)
     return;
-  if (key->keycode == CEC_USER_CONTROL_CODE_UNKNOWN)
-    return; /* button release marker */
-  const char *spec = find_spec(key->keycode);
-  if (!spec) {
-    fprintf(stderr, "cec-kbd: unmapped CEC key 0x%02x (duration %u)\n",
-            (unsigned)key->keycode, key->duration);
-    return;
-  }
-  fprintf(stderr, "cec-kbd: CEC key 0x%02x -> %s\n", (unsigned)key->keycode, spec);
-  tap_spec(spec);
+  struct cec_msg m;
+  memset(&m, 0, sizeof m);
+  m.msg[0] = (uint8_t)((a->la << 4) | (to & 0xf));
+  memcpy(&m.msg[1], data, (size_t)len);
+  m.len = (uint32_t)len + 1;
+  if (ioctl(a->fd, CEC_TRANSMIT, &m) < 0 && errno != EAGAIN)
+    fprintf(stderr, "cec-kbd: %s: transmit 0x%02x failed: %s\n", a->path, data[0], strerror(errno));
 }
 
-static void on_log(void *cbparam, const cec_log_message *msg) {
-  (void)cbparam;
-  if (msg && msg->message)
-    fprintf(stderr, "libcec: %s\n", msg->message);
+static void announce_active(struct adapter *a) {
+  if (a->pa == CEC_PHYS_ADDR_INVALID)
+    return;
+  uint8_t d[3] = {OP_ACTIVE_SOURCE, (uint8_t)(a->pa >> 8), (uint8_t)(a->pa & 0xff)};
+  cec_send(a, LA_BROADCAST, d, 3);
+  a->active = true;
+}
+
+static void refresh_state(struct adapter *a) {
+  uint16_t pa = CEC_PHYS_ADDR_INVALID;
+  if (ioctl(a->fd, CEC_ADAP_G_PHYS_ADDR, &pa) == 0)
+    a->pa = pa;
+  struct cec_log_addrs l;
+  memset(&l, 0, sizeof l);
+  a->la = CEC_LOG_ADDR_INVALID;
+  if (ioctl(a->fd, CEC_ADAP_G_LOG_ADDRS, &l) == 0 && l.num_log_addrs > 0 &&
+      l.log_addr[0] != CEC_LOG_ADDR_INVALID)
+    a->la = l.log_addr[0];
+  if (a->pa == CEC_PHYS_ADDR_INVALID) {
+    a->active = false;
+    a->activated = false;
+  }
+  fprintf(stderr, "cec-kbd: %s: physical address %x.%x.%x.%x, logical address %d\n", a->path,
+          a->pa >> 12, (a->pa >> 8) & 0xf, (a->pa >> 4) & 0xf, a->pa & 0xf,
+          a->la == CEC_LOG_ADDR_INVALID ? -1 : a->la);
+  if (g_activate && !a->activated && a->pa != CEC_PHYS_ADDR_INVALID && a->la != CEC_LOG_ADDR_INVALID) {
+    uint8_t ivo = OP_IMAGE_VIEW_ON;
+    cec_send(a, LA_TV, &ivo, 1);
+    announce_active(a);
+    a->activated = true;
+  }
+}
+
+static int adapter_open(const char *path) {
+  if (g_nad >= MAX_ADAPTERS)
+    return -1;
+  int fd = open(path, O_RDWR | O_NONBLOCK);
+  if (fd < 0)
+    return -1;
+  struct adapter *a = &g_ad[g_nad];
+  memset(a, 0, sizeof *a);
+  a->fd = fd;
+  a->pa = CEC_PHYS_ADDR_INVALID;
+  a->la = CEC_LOG_ADDR_INVALID;
+  snprintf(a->path, sizeof a->path, "%s", path);
+
+  struct cec_caps caps;
+  memset(&caps, 0, sizeof caps);
+  if (ioctl(fd, CEC_ADAP_G_CAPS, &caps) < 0) {
+    fprintf(stderr, "cec-kbd: %s: not a CEC adapter: %s\n", path, strerror(errno));
+    close(fd);
+    return -1;
+  }
+  uint32_t mode = CEC_MODE_INITIATOR | CEC_MODE_FOLLOWER;
+  if (ioctl(fd, CEC_S_MODE, &mode) < 0) {
+    fprintf(stderr, "cec-kbd: %s: cannot become follower: %s\n", path, strerror(errno));
+    close(fd);
+    return -1;
+  }
+  if (caps.capabilities & CEC_CAP_LOG_ADDRS) {
+    struct cec_log_addrs l;
+    memset(&l, 0, sizeof l);
+    ioctl(fd, CEC_ADAP_S_LOG_ADDRS, &l); /* clear any previous claim */
+    l.cec_version = CEC_OP_CEC_VERSION_1_4;
+    l.vendor_id = CEC_VENDOR_ID_NONE;
+    l.flags = CEC_LOG_ADDRS_FL_ALLOW_UNREG_FALLBACK;
+    snprintf(l.osd_name, sizeof l.osd_name, "Jellyby");
+    l.num_log_addrs = 1;
+    l.log_addr_type[0] = CEC_LOG_ADDR_TYPE_PLAYBACK;
+    l.primary_device_type[0] = CEC_OP_PRIM_DEVTYPE_PLAYBACK;
+    l.all_device_types[0] = CEC_OP_ALL_DEVTYPE_PLAYBACK;
+    if (ioctl(fd, CEC_ADAP_S_LOG_ADDRS, &l) < 0)
+      fprintf(stderr, "cec-kbd: %s: claiming a playback address failed: %s\n", path, strerror(errno));
+  }
+  fprintf(stderr, "cec-kbd: opened %s (%s)\n", path, caps.driver);
+  g_nad++;
+  refresh_state(a);
+  return 0;
+}
+
+static void handle_msg(struct adapter *a, const struct cec_msg *m) {
+  if (m->len < 2)
+    return; /* poll message */
+  uint8_t from = m->msg[0] >> 4;
+  uint8_t op = m->msg[1];
+  uint16_t pa_arg = m->len >= 4 ? (uint16_t)((m->msg[2] << 8) | m->msg[3]) : 0;
+
+  switch (op) {
+  case OP_USER_CONTROL_PRESSED: {
+    if (m->len < 3)
+      return;
+    uint8_t code = m->msg[2];
+    const char *spec = find_spec(code);
+    if (!spec) {
+      fprintf(stderr, "cec-kbd: unmapped CEC key 0x%02x\n", code);
+      return;
+    }
+    fprintf(stderr, "cec-kbd: CEC key 0x%02x -> %s\n", code, spec);
+    tap_spec(spec);
+    return;
+  }
+  case OP_USER_CONTROL_RELEASED:
+    return;
+  case OP_GIVE_POWER_STATUS: {
+    uint8_t d[2] = {OP_REPORT_POWER_STATUS, 0x00 /* on */};
+    cec_send(a, from, d, 2);
+    return;
+  }
+  case OP_MENU_REQUEST: {
+    uint8_t d[2] = {OP_MENU_STATUS, 0x00 /* activated: send us the keys */};
+    cec_send(a, from, d, 2);
+    return;
+  }
+  case OP_GIVE_OSD_NAME: {
+    uint8_t d[8] = {OP_SET_OSD_NAME, 'J', 'e', 'l', 'l', 'y', 'b', 'y'};
+    cec_send(a, from, d, 8);
+    return;
+  }
+  case OP_SET_STREAM_PATH:
+  case OP_ROUTING_INFORMATION:
+    if (m->len >= 4 && pa_arg == a->pa)
+      announce_active(a);
+    return;
+  case OP_ROUTING_CHANGE:
+    if (m->len >= 6) {
+      uint16_t to_pa = (uint16_t)((m->msg[4] << 8) | m->msg[5]);
+      if (to_pa == a->pa)
+        announce_active(a);
+      else
+        a->active = false;
+    }
+    return;
+  case OP_REQUEST_ACTIVE_SOURCE:
+    if (a->active)
+      announce_active(a);
+    return;
+  case OP_ACTIVE_SOURCE:
+    if (from != a->la)
+      a->active = false;
+    return;
+  default:
+    return;
+  }
 }
 
 static void on_signal(int sig) {
@@ -345,76 +513,90 @@ int main(int argc, char **argv) {
     return 1;
   }
   fprintf(stderr, "cec-kbd: loaded %d mappings from %s\n", g_map_len, conf);
-
-  libcec_configuration config;
-  memset(&config, 0, sizeof config);
-  config.clientVersion = LIBCEC_VERSION_CURRENT;
-  snprintf(config.strDeviceName, sizeof config.strDeviceName, "Jellyby");
-  config.deviceTypes.types[0] = CEC_DEVICE_TYPE_RECORDING_DEVICE;
-  for (int i = 1; i < 5; i++)
-    config.deviceTypes.types[i] = CEC_DEVICE_TYPE_RESERVED;
-  config.bActivateSource = 0;
-  config.comboKey = CEC_USER_CONTROL_CODE_UNKNOWN;
-  config.cecVersion = CEC_VERSION_1_4;
-
-  libcec_connection_t conn = libcec_initialise(&config);
-  if (!conn) {
-    fprintf(stderr, "cec-kbd: libcec_initialise failed\n");
-    return 1;
-  }
-
-  cec_adapter_descriptor adapters[8];
-  int8_t n = libcec_detect_adapters(conn, adapters, 8, NULL, 0);
-  /* Port choice: $CEC_KBD_PORT override, else the first detected adapter,
-   * else the kernel CEC device (/dev/cec0: Pi 4 under vc4-kms, Rockchip
-   * dw-hdmi), else libcec's legacy Raspberry Pi firmware adapter. */
-  const char *port = getenv("CEC_KBD_PORT");
-  if (!port || !*port) {
-    if (n > 0)
-      port = adapters[0].strComPath;
-    else if (access("/dev/cec0", F_OK) == 0)
-      port = "/dev/cec0";
-    else
-      port = "RPI";
-  }
-  fprintf(stderr, "cec-kbd: %d CEC adapter(s) found, opening '%s'\n", n, port);
-  if (!libcec_open(conn, port, CEC_DEFAULT_CONNECT_TIMEOUT)) {
-    fprintf(stderr, "cec-kbd: libcec_open('%s') failed\n", port);
-    libcec_destroy(conn);
-    return 1;
-  }
-
-  ICECCallbacks cb;
-  memset(&cb, 0, sizeof cb);
-  cb.keyPress = on_key;
-  cb.logMessage = on_log;
-#if defined(CEC_LIB_VERSION_MAJOR) && CEC_LIB_VERSION_MAJOR >= 5
-  if (!libcec_set_callbacks(conn, &cb, NULL)) {
-    fprintf(stderr, "cec-kbd: libcec_set_callbacks failed\n");
-    libcec_close(conn);
-    libcec_destroy(conn);
-    return 1;
-  }
-#else
-  libcec_enable_callbacks(conn, NULL, &cb);
-#endif
+  const char *act = getenv("CEC_KBD_ACTIVATE");
+  g_activate = act && strcmp(act, "1") == 0;
 
   if (uinput_init() < 0) {
     fprintf(stderr, "cec-kbd: cannot create uinput device: %s\n", strerror(errno));
-    libcec_close(conn);
-    libcec_destroy(conn);
     return 1;
   }
-  fprintf(stderr, "cec-kbd: listening for CEC key presses\n");
 
-  signal(SIGTERM, on_signal);
-  signal(SIGINT, on_signal);
-  while (g_run)
-    sleep(1);
+  if (argc > 2) {
+    for (int i = 2; i < argc; i++)
+      adapter_open(argv[i]);
+  } else if (getenv("CEC_KBD_PORT") && *getenv("CEC_KBD_PORT")) {
+    char buf[256];
+    snprintf(buf, sizeof buf, "%s", getenv("CEC_KBD_PORT"));
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, " ,", &save); tok; tok = strtok_r(NULL, " ,", &save))
+      adapter_open(tok);
+  } else {
+    char path[32];
+    for (int i = 0; i < MAX_ADAPTERS; i++) {
+      snprintf(path, sizeof path, "/dev/cec%d", i);
+      if (access(path, F_OK) == 0)
+        adapter_open(path);
+    }
+  }
+  if (g_nad == 0) {
+    /* exit non-zero: systemd restarts us (the CEC device may appear late) */
+    fprintf(stderr, "cec-kbd: no usable CEC adapter (/dev/cec*); is HDMI-CEC enabled in the device tree?\n");
+    close(g_uinput);
+    return 1;
+  }
 
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = on_signal;
+  sigaction(SIGTERM, &sa, NULL);
+  sigaction(SIGINT, &sa, NULL);
+  fprintf(stderr, "cec-kbd: listening for CEC key presses on %d adapter(s)\n", g_nad);
+
+  struct pollfd pfd[MAX_ADAPTERS];
+  while (g_run) {
+    for (int i = 0; i < g_nad; i++) {
+      pfd[i].fd = g_ad[i].fd;
+      pfd[i].events = POLLIN | POLLPRI;
+      pfd[i].revents = 0;
+    }
+    int n = poll(pfd, (nfds_t)g_nad, 1000);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      fprintf(stderr, "cec-kbd: poll: %s\n", strerror(errno));
+      break;
+    }
+    for (int i = 0; i < g_nad; i++) {
+      struct adapter *a = &g_ad[i];
+      if (pfd[i].revents & POLLPRI) {
+        struct cec_event ev;
+        memset(&ev, 0, sizeof ev);
+        while (ioctl(a->fd, CEC_DQEVENT, &ev) == 0) {
+          if (ev.event == CEC_EVENT_STATE_CHANGE)
+            refresh_state(a);
+          else if (ev.event == CEC_EVENT_LOST_MSGS)
+            fprintf(stderr, "cec-kbd: %s: lost %u messages\n", a->path, ev.lost_msgs.lost_msgs);
+          memset(&ev, 0, sizeof ev);
+        }
+      }
+      if (pfd[i].revents & POLLIN) {
+        struct cec_msg m;
+        memset(&m, 0, sizeof m);
+        while (ioctl(a->fd, CEC_RECEIVE, &m) == 0) {
+          handle_msg(a, &m);
+          memset(&m, 0, sizeof m);
+        }
+      }
+      if (pfd[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        fprintf(stderr, "cec-kbd: %s: device error, exiting for a restart\n", a->path);
+        g_run = 0;
+      }
+    }
+  }
+
+  for (int i = 0; i < g_nad; i++)
+    close(g_ad[i].fd);
   close(g_uinput);
-  libcec_close(conn);
-  libcec_destroy(conn);
   fprintf(stderr, "cec-kbd: stopped\n");
-  return 0;
+  return g_run ? 1 : 0;
 }

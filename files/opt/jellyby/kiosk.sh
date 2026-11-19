@@ -16,6 +16,13 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 
+# Minimal window manager: gives keyboard focus to mpv when it opens on top
+# of the browser and back to the browser when it exits. Without one, X keeps
+# focus on Chromium and the remote cannot control or quit mpv.
+if command -v openbox >/dev/null 2>&1 && ! pgrep -u "$(id -u)" -x openbox >/dev/null; then
+  openbox >/dev/null 2>&1 &
+fi
+
 # Low-RAM boards (Radxa ZERO 3, 1-2 GB) share memory with mpv: cap renderers.
 EXTRA_FLAGS=()
 if [ "$(cat /etc/jellyby/board 2>/dev/null || true)" = "zero3" ]; then
@@ -25,6 +32,7 @@ fi
 exec "$BIN" \
   "${EXTRA_FLAGS[@]}" \
   --kiosk \
+  --password-store=basic \
   --disable-breakpad \
   --no-first-run \
   --no-default-browser-check \

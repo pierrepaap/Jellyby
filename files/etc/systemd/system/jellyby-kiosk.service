@@ -9,8 +9,10 @@ User=media
 Group=media
 Environment=DISPLAY=:0
 Environment=HOME=/home/media
-Environment=XDG_RUNTIME_DIR=/run/user/%U
-ExecStartPre=/usr/bin/install -d -m 700 -o media -g media /run/user/%U
+# (%U would be root's UID in a system unit, not media's: use our own dir)
+Environment=XDG_RUNTIME_DIR=/run/jellyby-kiosk
+RuntimeDirectory=jellyby-kiosk
+RuntimeDirectoryMode=0700
 ExecStart=/opt/jellyby/kiosk.sh
 Restart=always
 RestartSec=3

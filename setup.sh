@@ -64,9 +64,10 @@ apt-get install -y \
   "$CHROMIUM_PKG" \
   mpv \
   xserver-xorg xserver-xorg-input-libinput xserver-xorg-video-fbdev \
+  x11-xserver-utils openbox \
   openssh-server sudo \
-  git make gcc pkg-config \
-  libcec-dev cec-utils v4l-utils \
+  git make gcc pkg-config linux-libc-dev \
+  v4l-utils \
   libusb-1.0-0-dev librtlsdr-dev libncurses-dev zlib1g-dev libzstd-dev \
   python3
 
@@ -103,7 +104,14 @@ fi
 
 echo "==> Creating kiosk user 'media'"
 if ! id media >/dev/null 2>&1; then
-  useradd --create-home --shell /bin/bash media
+  # Never take UID 1000: on Raspberry Pi OS the first-boot userconf step
+  # renames whatever account owns UID 1000 to the login user (pi), which
+  # would hijack the kiosk account.
+  MEDIA_UID=1001
+  while getent passwd "$MEDIA_UID" >/dev/null || getent group "$MEDIA_UID" >/dev/null; do
+    MEDIA_UID=$((MEDIA_UID + 1))
+  done
+  useradd --create-home --shell /bin/bash --uid "$MEDIA_UID" --user-group media
 fi
 # mpv needs the GPU (renderD128) and the hardware decoder nodes: rpivid V4L2
 # on the Pi, /dev/mpp_service + /dev/rga + /dev/dma_heap on Rockchip (the udev
@@ -144,26 +152,35 @@ for unit in jellyby-web jellyby-x jellyby-kiosk cec-kbd readsb; do
   install -m 644 "$FILES/etc/systemd/system/$unit.service" "/etc/systemd/system/$unit.service"
 done
 
-# The launcher web app saves /etc/jellyby/apps.json as user 'media'
-# (players.json keeps media:media 0600 — it contains credentials)
-chown media:media /etc/jellyby/apps.json /etc/jellyby/cec-keymap.conf 2>/dev/null || chown -R media:media /etc/jellyby
+# The launcher (user 'media') saves apps.json and players.json atomically via
+# a temp file + rename in /etc/jellyby, so it must own the directory too.
+# players.json stays media:media 0600 (credentials).
+chown media:media /etc/jellyby /etc/jellyby/apps.json /etc/jellyby/cec-keymap.conf
+
+# RTL-SDR dongles get grabbed by the kernel's DVB-T driver, which blocks readsb.
+install -m 644 "$FILES/etc/modprobe.d/jellyby-rtlsdr.conf" /etc/modprobe.d/jellyby-rtlsdr.conf
+
+# Pi 4: default ALSA output (mpv, Chromium) -> HDMI0. Without it audio goes to
+# the first ALSA card, often the headphone jack. Not overwritten on re-runs.
+if [[ "$BOARD" == "pi4" && ! -f /etc/asound.conf ]]; then
+  install -m 644 "$FILES/etc/asound-pi4.conf" /etc/asound.conf
+fi
 
 echo "==> Compiling CEC keyboard daemon"
-# libcec.pc on Debian/Raspberry Pi OS declares "Requires: p8-platform" but does
-# not ship that .pc, so pkg-config fails; fall back to plain -lcec.
-CEC_LIBS="$(pkg-config --libs libcec 2>/dev/null || true)"
-if [[ -z "${CEC_LIBS// }" ]]; then
-  CEC_LIBS="-lcec"
-fi
-read -r -a CEC_LIB_ARGS <<< "$CEC_LIBS"
-gcc -O2 -Wall -o /usr/local/bin/cec-kbd "$FILES/opt/jellyby/cec_kbd.c" "${CEC_LIB_ARGS[@]}"
+# Kernel CEC API only (/dev/cecN via <linux/cec.h>): no libcec needed.
+gcc -O2 -Wall -o /usr/local/bin/cec-kbd "$FILES/opt/jellyby/cec_kbd.c"
 
 echo "==> Building readsb from source"
-if [[ ! -x /usr/local/bin/readsb ]]; then
+# Marker: builds from before RTLSDR=yes lacked dongle support -> rebuild once.
+READSB_MARKER=/usr/local/share/jellyby/readsb-rtlsdr
+if [[ ! -x /usr/local/bin/readsb || ! -f "$READSB_MARKER" ]]; then
   rm -rf /opt/readsb-src
   git clone --depth 1 https://github.com/wiedehopf/readsb.git /opt/readsb-src
-  make -C /opt/readsb-src -j"$(nproc)" readsb || make -C /opt/readsb-src -j"$(nproc)"
+  # RTLSDR=yes is required: readsb's Makefile defaults to no SDR support, and
+  # "--device-type rtlsdr" would then be rejected at runtime.
+  make -C /opt/readsb-src -j"$(nproc)" RTLSDR=yes
   install -m 755 /opt/readsb-src/readsb /usr/local/bin/readsb
+  install -d "$(dirname "$READSB_MARKER")" && touch "$READSB_MARKER"
 fi
 
 # Boot config (idempotent, also in chroot via JELLYBY_BOOT_DIR bind mount):

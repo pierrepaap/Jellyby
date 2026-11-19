@@ -72,7 +72,7 @@ else
 fi
 
 export DISPLAY="${DISPLAY:-:0}"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 
 START_ARG=()
 if [ -n "$START" ]; then
