@@ -29,10 +29,6 @@ on:
   release:
     types: [published]
   workflow_dispatch:
-  push:
-    # TEMPORARY: lets this branch run the full build before workflow_dispatch
-    # exists on the default branch. Remove once merged.
-    branches: [claude/magical-hamilton-lt5dy4]
 
 permissions:
   contents: write
