@@ -34,12 +34,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# mount_part <partition number> <dir>: via the loop partition node, or, if the
+# kernel did not create one (e.g. it rejected the partition table), via the
+# partition's byte offset read from the table with sfdisk.
+mount_part() {
+  local n="$1" dir="$2"
+  if [ -b "${LOOP}p${n}" ]; then
+    sudo mount "${LOOP}p${n}" "$dir"
+    return
+  fi
+  echo "note: ${LOOP}p${n} missing (kernel rejected the partition table?) — mounting by offset"
+  sudo sfdisk -l "$IMG" || true
+  local start
+  start=$(sudo sfdisk -d "$IMG" | awk -v n="$n" '$1 ~ ("[^0-9]" n "$") { for (i = 1; i <= NF; i++) if ($i == "start=") { v = $(i+1); sub(",", "", v); print v } }')
+  [ -n "$start" ] || { echo "FAIL: partition $n not found in $IMG"; exit 1; }
+  sudo mount -o "loop,offset=$((start * 512))" "$IMG" "$dir"
+}
+
 if [ "$BOARD" = "pi4" ]; then
-  sudo mount "${LOOP}p2" "$MNT"
+  mount_part 2 "$MNT"
   sudo mkdir -p "$MNT/boot/firmware"
-  sudo mount "${LOOP}p1" "$MNT/boot/firmware"
+  mount_part 1 "$MNT/boot/firmware"
 else
-  sudo mount "${LOOP}p1" "$MNT"
+  mount_part 1 "$MNT"
 fi
 
 fail=0

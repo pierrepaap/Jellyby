@@ -67,7 +67,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          sudo bash scripts/ci-apt.sh qemu-user-static binfmt-support parted e2fsprogs xz-utils curl openssl cloud-guest-utils
+          sudo bash scripts/ci-apt.sh qemu-user-static binfmt-support parted e2fsprogs xz-utils curl openssl cloud-guest-utils gdisk fdisk
           test -x /usr/bin/qemu-aarch64-static   # guard: apt must not have skipped it
 
       - name: Download base image (${{ matrix.board }})
@@ -168,6 +168,14 @@ jobs:
             echo "pishrink failed, using unshrunk image"
             cp base.img "$OUT_IMG"
           fi
+          # GPT images (Rockchip/Armbian): PiShrink truncates the file but leaves
+          # the backup GPT header beyond the new end, so the kernel rejects the
+          # table and the image has no partitions. Move the backup to the end.
+          if sudo sfdisk -d "$OUT_IMG" 2>/dev/null | grep -q '^label: gpt'; then
+            sudo sgdisk -e "$OUT_IMG"
+            sudo sgdisk -v "$OUT_IMG"
+          fi
+          sudo sfdisk -l "$OUT_IMG"
           xz -T0 -9 -k "$OUT_IMG"
           ls -lh "$OUT_IMG.xz"
 
