@@ -128,8 +128,14 @@ Jellyby can sit alongside other OSes on one SD card:
 
 2. Reboot PINN — **Jellyby** appears in the OS list (group "Media"). Tick it
    with any other OSes and press Install.
-3. PINN writes the partitions and runs `partition_setup.sh`, which rewrites
-   `cmdline.txt`/`fstab` to the new PARTUUIDs. The rootfs expands on first boot.
+3. PINN writes the partitions and runs `partition_setup.sh`, which points
+   `cmdline.txt`/`fstab` at the new partitions (by PARTUUID, so it also boots
+   from USB) and removes Pi OS's first-boot resize step: PINN has already sized
+   the root partition, and that step could otherwise fail or change the card's
+   disk ID, breaking the other OSes on it.
+
+> The PINN route has not been tested on a Pi yet. If Jellyby doesn't come up
+> from PINN, the plain image (options A/B) is the reference.
 
 ### Option D — Radxa ZERO 3E/3W (experimental, untested on hardware)
 
