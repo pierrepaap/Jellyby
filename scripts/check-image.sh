@@ -45,6 +45,11 @@ mount_part() {
   fi
   echo "note: ${LOOP}p${n} missing (kernel rejected the partition table?) — mounting by offset"
   sudo sfdisk -l "$IMG" || true
+  if sudo sfdisk -d "$IMG" 2>/dev/null | grep -q 'type=ee'; then
+    echo "FAIL: $IMG has a GPT whose backup header is beyond the end of the file"
+    echo "      (truncated after shrinking?) — fix with: sgdisk -e $IMG"
+    exit 1
+  fi
   local start
   start=$(sudo sfdisk -d "$IMG" | awk -v n="$n" '$1 ~ ("[^0-9]" n "$") { for (i = 1; i <= NF; i++) if ($i == "start=") { v = $(i+1); sub(",", "", v); print v } }')
   [ -n "$start" ] || { echo "FAIL: partition $n not found in $IMG"; exit 1; }
