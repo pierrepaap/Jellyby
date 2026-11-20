@@ -10,7 +10,7 @@ const state = {
   net: { interfaces: [], ifaceIdx: 0, mode: "dhcp", confirm: false },
   netForm: { address: "", gateway: "", dns: "" },
   media: { app: null, stack: [], items: [] },
-};;
+};
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -580,6 +580,7 @@ function oskSet(v) {
 
 function openOsk(target) {
   state.oskTarget = target;
+  state.oskOriginal = oskValue();
   $("#osk-target").textContent = (OSK_LABELS[target] || target) + ": " + oskValue();
   const osk = $("#osk");
   osk.innerHTML = "";
@@ -599,7 +600,8 @@ function openOsk(target) {
   if (els.length) els[0].focus();
 }
 
-function closeOsk() {
+function closeOsk(accept) {
+  if (!accept && state.oskTarget) oskSet(state.oskOriginal || "");
   state.oskTarget = null;
   $("#osk-overlay").classList.add("hidden");
   renderForm();

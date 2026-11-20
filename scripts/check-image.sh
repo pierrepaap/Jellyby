@@ -17,6 +17,14 @@ BOARD="${2:-pi4}"
 case "$BOARD" in pi4|zero3) ;; *) echo "unknown board: $BOARD"; exit 1 ;; esac
 
 LOOP=$(sudo losetup -fP --show "$IMG")
+# The partition nodes (${LOOP}p1, p2) appear asynchronously: wait for them,
+# or the mount below races and fails with "special device does not exist".
+sudo partprobe "$LOOP" 2>/dev/null || true
+sudo udevadm settle 2>/dev/null || true
+for _ in $(seq 1 20); do
+  [ -b "${LOOP}p1" ] && break
+  sleep 0.5
+done
 MNT=$(mktemp -d /tmp/jellyby-check.XXXXXX)
 cleanup() {
   sudo umount "$MNT/boot/firmware" 2>/dev/null || true
@@ -26,12 +34,34 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# mount_part <partition number> <dir>: via the loop partition node, or, if the
+# kernel did not create one (e.g. it rejected the partition table), via the
+# partition's byte offset read from the table with sfdisk.
+mount_part() {
+  local n="$1" dir="$2"
+  if [ -b "${LOOP}p${n}" ]; then
+    sudo mount "${LOOP}p${n}" "$dir"
+    return
+  fi
+  echo "note: ${LOOP}p${n} missing (kernel rejected the partition table?) — mounting by offset"
+  sudo sfdisk -l "$IMG" || true
+  if sudo sfdisk -d "$IMG" 2>/dev/null | grep -q 'type=ee'; then
+    echo "FAIL: $IMG has a GPT whose backup header is beyond the end of the file"
+    echo "      (truncated after shrinking?) — fix with: sgdisk -e $IMG"
+    exit 1
+  fi
+  local start
+  start=$(sudo sfdisk -d "$IMG" | awk -v n="$n" '$1 ~ ("[^0-9]" n "$") { for (i = 1; i <= NF; i++) if ($i == "start=") { v = $(i+1); sub(",", "", v); print v } }')
+  [ -n "$start" ] || { echo "FAIL: partition $n not found in $IMG"; exit 1; }
+  sudo mount -o "loop,offset=$((start * 512))" "$IMG" "$dir"
+}
+
 if [ "$BOARD" = "pi4" ]; then
-  sudo mount "${LOOP}p2" "$MNT"
+  mount_part 2 "$MNT"
   sudo mkdir -p "$MNT/boot/firmware"
-  sudo mount "${LOOP}p1" "$MNT/boot/firmware"
+  mount_part 1 "$MNT/boot/firmware"
 else
-  sudo mount "${LOOP}p1" "$MNT"
+  mount_part 1 "$MNT"
 fi
 
 fail=0
@@ -57,6 +87,7 @@ if [ "$BOARD" = "pi4" ]; then
   check "boot config has max_framebuffers=2" sudo grep -q 'max_framebuffers=2' "$CFG"
   check "boot config has disable_splash=1"  sudo grep -q 'disable_splash=1' "$CFG"
   check "kernel cmdline has root="           sudo grep -q 'root=' "$MNT/boot/firmware/cmdline.txt"
+  check "HDMI audio default (asound.conf)"  sudo grep -q 'vc4hdmi0' "$MNT/etc/asound.conf"
   check "SSH enabled at first boot"         sudo test -f "$MNT/boot/firmware/ssh"
   check "default user configured"           sudo test -f "$MNT/boot/firmware/userconf.txt"
 else
@@ -73,6 +104,10 @@ for f in \
   /usr/local/bin/readsb \
   /usr/local/bin/readsb-wrapper \
   /usr/bin/mpv \
+  /usr/bin/openbox \
+  /usr/bin/xset \
+  /usr/local/share/jellyby/readsb-rtlsdr \
+  /etc/modprobe.d/jellyby-rtlsdr.conf \
   /opt/jellyby/server.py \
   /opt/jellyby/kiosk.sh \
   /opt/jellyby/play.sh \
@@ -105,6 +140,9 @@ check "media user in audio group" sudo grep -Eq "^audio:[^:]*:[^:]*:([^,]*,)?med
 MEDIA_UID=$(sudo sed -n 's/^media:[^:]*:\([0-9]*\):.*/\1/p' "$MNT/etc/passwd")
 MEDIA_GID=$(sudo sed -n 's/^media:[^:]*:\([0-9]*\):.*/\1/p' "$MNT/etc/group")
 check "media user exists" test -n "$MEDIA_UID"
+check "media user is not UID 1000 (Pi userconf renames UID 1000)" test "$MEDIA_UID" != "1000"
+check "/etc/jellyby owned by media (launcher saves settings)" test "$(sudo stat -c '%u' "$MNT/etc/jellyby")" = "$MEDIA_UID"
+check "cec-kbd does not need libcec" sudo sh -c "! grep -q libcec '$MNT/usr/local/bin/cec-kbd'"
 check "players.json is media:media 0600" test "$(sudo stat -c '%u %g %a' "$MNT/etc/jellyby/players.json")" = "$MEDIA_UID $MEDIA_GID 600"
 check "sudoers syntax valid" sudo visudo -cf "$MNT/etc/sudoers.d/jellyby"
 check "apps.json is valid JSON" sudo python3 -m json.tool "$MNT/etc/jellyby/apps.json"

@@ -6,6 +6,10 @@ After=network.target
 Type=simple
 User=media
 Group=media
+# mpv is started from here (play.sh): give it a private runtime dir
+Environment=XDG_RUNTIME_DIR=/run/jellyby-web
+RuntimeDirectory=jellyby-web
+RuntimeDirectoryMode=0700
 ExecStart=/usr/bin/python3 /opt/jellyby/server.py
 Restart=always
 RestartSec=2

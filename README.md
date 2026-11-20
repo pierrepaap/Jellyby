@@ -52,7 +52,7 @@ hardware-decode profile. ZERO 3 install steps:
  remote --HDMI-CEC--> Pi 4
                         │
  ┌──────────────────────┼────────────────────────────────────────────┐
- │ cec-kbd (libcec → /dev/uinput) → Xorg → Chromium --kiosk           │
+ │ cec-kbd (/dev/cec* → /dev/uinput) → Xorg+openbox → Chromium kiosk  │
  │                                            │                       │
  │                       launcher: http://127.0.0.1:8901              │
  │                       server.py + www/ (tiles, browse, OSK)        │
@@ -71,7 +71,7 @@ hardware-decode profile. ZERO 3 install steps:
 | Display | `jellyby-x` | Xorg on `:0` |
 | Kiosk browser | `jellyby-kiosk` | Chromium `--kiosk`; shows the launcher and `browser`-type tiles |
 | Native player | on demand | system `mpv` fullscreen on `:0`, started by `/opt/jellyby/play.sh` |
-| CEC remote → keyboard | `cec-kbd` | libcec daemon injecting keys via uinput |
+| CEC remote → keyboard | `cec-kbd` | small C daemon on the kernel CEC API (`/dev/cec*`), injects keys via uinput |
 | ADS-B receiver | `readsb` | options in `/etc/default/readsb` |
 | SSH | `ssh` | enabled |
 
@@ -86,15 +86,16 @@ hardware-decode profile. ZERO 3 install steps:
 2. Choose **OS → Jellyby (Raspberry Pi 4) → Jellyby Pi 4 (64-bit)**, pick the SD
    card, and set hostname / Wi-Fi / your own user in the customisation dialog
    (recommended).
-3. Flash, then boot the Pi with HDMI to the display and Ethernet (or the Wi-Fi
-   set in step 2).
+3. Flash, then boot the Pi with the display on **HDMI0** (the micro-HDMI port
+   next to the USB-C power socket — audio goes there by default) and Ethernet
+   (or the Wi-Fi set in step 2).
 
 > The image ships with SSH enabled and a default login **pi / jellyby** unless
 > you set your own user in Imager. Change it immediately (`passwd` or SSH keys).
 
 ### Option B — build on a stock Raspberry Pi OS Lite
 
-1. Flash **Raspberry Pi OS Lite (64-bit, Bookworm)** with SSH enabled.
+1. Flash **Raspberry Pi OS Lite (64-bit, Trixie or Bookworm)** with SSH enabled.
 2. Then:
 
    ```bash
@@ -193,15 +194,16 @@ Over SSH:
 
 ```bash
 ls /dev/cec0 /dev/mpp_service /dev/rga /dev/dma_heap   # CEC + decoder device nodes exist?
-cec-client -l                                          # should list a "Linux" CEC adapter
-journalctl -u cec-kbd -b                               # which CEC port cec-kbd opened
+cec-ctl -d /dev/cec0 --show-topology                   # TV and other HDMI devices visible?
+journalctl -u cec-kbd -b                               # adapter opened, address claimed, keys
+aplay -l                                               # HDMI audio card name
 mpv --hwdec=rkmpp --msg-level=vd=v <video-file>        # look for "Using hardware decoding (rkmpp)"
 ```
 
 - `/dev/cec0` missing → the board's device tree needs a CEC overlay
   (`overlays=...` in `/boot/armbianEnv.txt`); the remote won't work until then.
   A keyboard plugged into the board works meanwhile.
-- `cec-kbd` opened the wrong port → force it, see `CEC_KBD_PORT` below.
+- Keys don't arrive → see [CEC remote mapping](#cec-remote-mapping).
 - No "Using hardware decoding" line → mpv is not MPP-enabled (see the
   video decoding note above).
 
@@ -246,7 +248,7 @@ which requires `dtoverlay=vc4-kms-v3d` and `gpu_mem=256` in `config.txt`
 - Playing (`POST /api/media/play`) resolves a **direct-play** URL
   (`/Videos/{id}/stream?static=true`, original file) and starts mpv with
   `/opt/jellyby/mpv/mpv.conf` (`vo=gpu`, fullscreen) plus the board's hwdec
-  profile `board.conf` (`auto-safe` on Pi 4, `rkmpp` on ZERO 3). The
+  profile `board.conf` (`drm` on Pi 4, `rkmpp` on ZERO 3). The
   URL is passed via a 0600 playlist file, never on the command line.
 - Credentials live in `/etc/jellyby/players.json`, keyed by app name (edit over
   SSH). After the first login the AccessToken + UserId are stored there and
@@ -284,8 +286,22 @@ play      = space
 volume_up = volumeup
 ```
 
-After editing: `sudo systemctl restart cec-kbd`. Debug with
-`journalctl -u cec-kbd -f`, or test CEC itself with `cec-client`.
+After editing: `sudo systemctl restart cec-kbd`.
+
+`cec-kbd` talks to the kernel's CEC devices (`/dev/cec0`, plus `/dev/cec1`
+for the Pi 4's second HDMI port) directly. It registers as a playback device
+named **Jellyby** and answers the TV's routing queries, so the TV sends the
+remote's keys to it.
+
+**Debugging:**
+
+- `journalctl -u cec-kbd -f` shows the adapter it opened, its HDMI address,
+  and every key received (`CEC key 0x01 -> up`, or `unmapped CEC key 0x..`
+  for buttons you can then add to the keymap).
+- No keys at all → on the TV, enable HDMI-CEC (brand names: Anynet+, SimpLink,
+  Bravia Sync, …) and select the Jellyby input once.
+- Low-level view of the bus: `cec-ctl -d /dev/cec0 --monitor` (from
+  `v4l-utils`; stop `cec-kbd` first).
 
 ## readsb (ADS-B)
 
@@ -320,18 +336,18 @@ values is safe.
 | `JELLYBY_THEATER` | `0` | `1` = also install Jellyfin Media Player (flatpak) / Emby Theater |
 | `JELLYBY_OFFLINE` | `0` | CI only (image build in a chroot) — don't set by hand |
 
-**2. In the `cec-kbd` service** (on the board, any time), only if the CEC
-remote doesn't work because the wrong port was picked:
+**2. In the `cec-kbd` service** (on the board, any time):
 
 | Variable | Default | Effect |
 |---|---|---|
-| `CEC_KBD_PORT` | auto | CEC port to open, e.g. `/dev/cec0` (or `RPI` for the legacy Pi firmware adapter) |
+| `CEC_KBD_ACTIVATE` | `0` | `1` = at start, turn the TV on and switch it to the Jellyby input |
+| `CEC_KBD_PORT` | all `/dev/cec0`–`3` | only use these CEC devices, e.g. `/dev/cec0` |
 
 ```bash
 sudo systemctl edit cec-kbd
-#   add these two lines, save:
+#   add these lines, save:
 #   [Service]
-#   Environment=CEC_KBD_PORT=/dev/cec0
+#   Environment=CEC_KBD_ACTIVATE=1
 sudo systemctl restart cec-kbd
 ```
 
@@ -404,15 +420,24 @@ Emulation caveats (handled by the script):
 
 HEVC (incl. 10-bit) hardware decode in mpv, HDMI-CEC remote pairing, actual
 playback of your library, readsb with a dongle. Useful checks over SSH on a
-Pi 4: `mpv --hwdec=auto-safe --msg-level=all=v <file>` and
-`v4l2-ctl -d /dev/video10 --list-formats`. For the ZERO 3, see
+Pi 4: `mpv --msg-level=vd=v <file>` (look for "Using hardware decoding
+(drm)"; HEVC only — H.264 decodes in software), `v4l2-ctl --list-devices`
+(should list `rpivid`), `speaker-test -c2 -t wav` (sound on the TV), and
+`journalctl -u cec-kbd -f` while pressing remote buttons. For the ZERO 3, see
 [First checks on the ZERO 3](#first-checks-on-the-zero-3).
 
 ## Release pipeline
 
 - **[`lint.yml`](.github/workflows/lint.yml)** runs on every push/PR:
-  shellcheck, `cec_kbd.c` syntax check against libcec headers, Python / JS /
-  JSON syntax checks.
+  shellcheck, Python / JS / JSON syntax checks, and two hardware-free tests:
+  - `tests/cec_kbd_sim.c`: `cec-kbd` against a simulated kernel CEC adapter
+    (address claim, replies to the TV, key → keyboard translation);
+  - `tests/test_server.py`: the launcher API against a fake Jellyfin server
+    (config save, browse, poster proxy, play → `play.sh` arguments, token
+    caching, network input validation).
+
+  Run them locally: `python3 -m unittest discover -s tests -v` and
+  `gcc -o /tmp/sim tests/cec_kbd_sim.c && /tmp/sim files/etc/jellyby/cec-keymap.conf`.
 - **[`release-image.yml`](.github/workflows/release-image.yml)** runs when a
   GitHub release is **published** (Releases → New release → tag e.g. `v0.5.0`
   → Publish). One job per board (`pi4`, `zero3`), each of which:
@@ -431,13 +456,18 @@ Pi 4: `mpv --hwdec=auto-safe --msg-level=all=v <file>` and
   publishes. It can be tuned with GitHub repository variables, see
   [Settings reference](#settings-reference).
 
+  **Test build without a release:** Actions tab → *release-image* → *Run
+  workflow* → pick a branch. Same build and checks, but nothing is published:
+  the images are attached to the run as downloadable artifacts
+  (`jellyby-pi4-image`, `jellyby-zero3-image`, kept 14 days).
+
 ## Security notes
 
 - The prebuilt images' default login is **pi / jellyby** — change it on first
   boot, use SSH keys, or set your own user in Imager (Pi). On the ZERO 3 image,
   Armbian's default root password is locked.
 - Kiosk Chromium runs **with its sandbox** (no `--no-sandbox`), relying on
-  unprivileged user namespaces (default on Pi OS Bookworm), since it loads
+  unprivileged user namespaces (default on Pi OS Bookworm and later), since it loads
   remote web UIs.
 - The launcher API listens on **127.0.0.1 only**.
 - The kiosk user (`media`) may only run, via sudo: `systemctl reboot`,

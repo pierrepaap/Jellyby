@@ -266,11 +266,16 @@ def validate_network(payload):
         gw = str(payload.get("gateway", "")).strip()
         dns = payload.get("dns", [])
         try:
-            net = ipaddress.ip_network(addr, strict=False)
+            # ip_interface keeps the host part (192.168.1.50/24); ip_network
+            # would collapse it to the subnet address (192.168.1.0/24).
+            ifc = ipaddress.ip_interface(addr)
         except ValueError:
             raise ValueError("address must be valid IPv4/CIDR, e.g. 192.168.1.50/24")
-        if net.version != 4 or net.prefixlen < 8 or net.prefixlen > 32:
-            raise ValueError("address must be IPv4 with prefix /8../32")
+        net = ifc.network
+        if ifc.version != 4 or net.prefixlen < 8 or net.prefixlen > 32 or "/" not in addr:
+            raise ValueError("address must be IPv4 with prefix /8../32, e.g. 192.168.1.50/24")
+        if net.prefixlen < 31 and ifc.ip in (net.network_address, net.broadcast_address):
+            raise ValueError("address is the subnet or broadcast address, pick a host address")
         try:
             g = ipaddress.ip_address(gw)
         except ValueError:
@@ -288,7 +293,7 @@ def validate_network(payload):
             if di.version != 4:
                 raise ValueError("dns servers must be IPv4")
             dnsout.append(str(di))
-        args += [f"{net.with_prefixlen}", str(g), ",".join(dnsout)]
+        args += [ifc.with_prefixlen, str(g), ",".join(dnsout)]
     return args
 
 
@@ -491,7 +496,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(e)}, 400)
             try:
                 r = subprocess.run(
-                    ["/usr/bin/sudo", NETAPPLY_SH] + args,
+                    [NETAPPLY_SH] + args,  # its nmcli calls use sudo -n (sudoers)
                     capture_output=True, text=True, timeout=60,
                 )
             except Exception as e:

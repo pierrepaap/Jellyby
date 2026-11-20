@@ -17,13 +17,18 @@ name: release-image
 #   ZERO3_MPV_DEBS        space-separated URLs of MPP-enabled mpv/ffmpeg .debs;
 #                         without them the zero3 image decodes video in software
 #
-# Single trigger: publishing a release (Releases -> New release -> Publish).
-# The lint workflow still runs on every PR/push and gates merges; image builds
-# are deliberately release-driven so each image maps to a versioned release.
+# Triggers:
+#   - publishing a release (Releases -> New release -> Publish): builds and
+#     attaches the images to that release;
+#   - "Run workflow" (Actions tab -> release-image): builds the images from the
+#     chosen branch WITHOUT publishing anything — they are downloadable as
+#     workflow artifacts for a test flash.
+# The lint workflow still runs on every PR/push and gates merges.
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -58,7 +63,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          sudo bash scripts/ci-apt.sh qemu-user-static binfmt-support parted e2fsprogs xz-utils curl openssl cloud-guest-utils
+          sudo bash scripts/ci-apt.sh qemu-user-static binfmt-support parted e2fsprogs xz-utils curl openssl cloud-guest-utils gdisk fdisk
           test -x /usr/bin/qemu-aarch64-static   # guard: apt must not have skipped it
 
       - name: Download base image (${{ matrix.board }})
@@ -75,6 +80,7 @@ jobs:
           truncate -s +8G base.img
           LOOP=$(sudo losetup -fP --show base.img)
           echo "LOOP=$LOOP" >> "$GITHUB_ENV"
+          sudo udevadm settle
           sudo growpart "$LOOP" "$ROOT_PART"
           sudo partprobe "$LOOP"
           sudo e2fsck -fy "${LOOP}p${ROOT_PART}"
@@ -158,6 +164,19 @@ jobs:
             echo "pishrink failed, using unshrunk image"
             cp base.img "$OUT_IMG"
           fi
+          # GPT images (Rockchip/Armbian): PiShrink truncates the file but leaves
+          # the backup GPT header beyond the new end, so the kernel rejects the
+          # table and the image has no partitions. Move the backup to the end.
+          # (a truncated GPT reads as "label: dos" with only the protective
+          # type=ee entry, so match that too)
+          if sudo sfdisk -d "$OUT_IMG" 2>/dev/null | grep -qE '^label: gpt|type=ee'; then
+            # PiShrink cuts the file right at the partition end: leave room for
+            # the backup GPT (otherwise sgdisk aborts: "overlaps the last partition")
+            sudo truncate -s +2M "$OUT_IMG"
+            sudo sgdisk -e "$OUT_IMG"
+            sudo sgdisk -v "$OUT_IMG"
+          fi
+          sudo sfdisk -l "$OUT_IMG"
           xz -T0 -9 -k "$OUT_IMG"
           ls -lh "$OUT_IMG.xz"
 
@@ -175,6 +194,8 @@ jobs:
           mkdir -p pinn-out
           sudo mkdir -p /mnt/pb /mnt/pr
           LOOP2=$(sudo losetup -fP --show "$OUT_IMG")
+          sudo partprobe "$LOOP2"; sudo udevadm settle
+          for _ in $(seq 1 20); do [ -b "${LOOP2}p2" ] && break; sleep 0.5; done
           sudo mount "${LOOP2}p1" /mnt/pb
           sudo mount "${LOOP2}p2" /mnt/pr
           BOOT_MIB=$(sudo du -sm /mnt/pb | cut -f1)
@@ -190,7 +211,7 @@ jobs:
             --boot-mib "$BOOT_MIB" --root-mib "$ROOT_MIB" \
             --base-url "https://github.com/pierrepaap/Jellyby/releases/latest/download" \
             --date "$(date -u +%Y-%m-%d)" \
-            --version "${{ github.event.release.tag_name }}"
+            --version "${{ github.event.release.tag_name || 'test' }}"
           cp pinn/partition_setup.sh pinn-out/
           cp pinn/Jellyby.png pinn-out/
           cp pinn/marketing.tar pinn-out/
@@ -230,8 +251,20 @@ jobs:
         if: matrix.board == 'zero3'
         run: sha256sum "$OUT_IMG.xz" > "$OUT_IMG.xz.sha256"
 
+      - name: Upload test build as workflow artifact (no release)
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jellyby-${{ matrix.board }}-image
+          compression-level: 0
+          retention-days: 14
+          path: |
+            jellyby-${{ matrix.board }}.img.xz
+            jellyby-zero3.img.xz.sha256
+            jellyby-imager.json
+
       - name: Publish GitHub Release (pi4)
-        if: matrix.board == 'pi4'
+        if: github.event_name == 'release' && matrix.board == 'pi4'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name }}
@@ -243,7 +276,7 @@ jobs:
             pinn-out/*
 
       - name: Publish GitHub Release (zero3)
-        if: matrix.board == 'zero3'
+        if: github.event_name == 'release' && matrix.board == 'zero3'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.release.tag_name }}
