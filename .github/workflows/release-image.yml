@@ -200,14 +200,16 @@ jobs:
           sudo mount "${LOOP2}p2" /mnt/pr
           BOOT_MIB=$(sudo du -sm /mnt/pb | cut -f1)
           ROOT_MIB=$(sudo du -sm /mnt/pr | cut -f1)
+          # Tarballs must be named <partition label>.tar.xz: for local /os installs
+          # PINN looks for boot.tar.xz / root.tar.xz in the image folder.
           sudo tar -cJf pinn-out/boot.tar.xz --exclude='lost+found' -C /mnt/pb .
-          sudo tar -cJf pinn-out/rootfs.tar.xz --exclude='lost+found' -C /mnt/pr .
+          sudo tar -cJf pinn-out/root.tar.xz --exclude='lost+found' -C /mnt/pr .
           sudo umount /mnt/pb /mnt/pr
           sudo losetup -d "$LOOP2"
           python3 scripts/gen-pinn.py \
             --out pinn-out \
             --boot-tar pinn-out/boot.tar.xz \
-            --rootfs-tar pinn-out/rootfs.tar.xz \
+            --rootfs-tar pinn-out/root.tar.xz \
             --boot-mib "$BOOT_MIB" --root-mib "$ROOT_MIB" \
             --base-url "https://github.com/pierrepaap/Jellyby/releases/latest/download" \
             --date "$(date -u +%Y-%m-%d)" \
