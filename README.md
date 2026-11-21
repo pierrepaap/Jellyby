@@ -120,16 +120,47 @@ way.
 Each release also ships [PINN](https://github.com/procount/pinn) assets, so
 Jellyby can sit alongside other OSes on one SD card:
 
-1. On PINN's boot partition, append to `recovery.cmdline`:
+1. Add the Jellyby list to PINN's options, on the **same single line** as
+   the existing ones (space-separated):
 
    ```
-   alt_image_source=https://github.com/pierrepaap/Jellyby/releases/latest/download/os_list_v3.json
+   alt_image_source=http://github.com/pierrepaap/Jellyby/releases/latest/download/os_list_v3.json
    ```
 
-2. Reboot PINN — **Jellyby** appears in the OS list (group "Media"). Tick it
-   with any other OSes and press Install.
-3. PINN writes the partitions and runs `partition_setup.sh`, which rewrites
-   `cmdline.txt`/`fstab` to the new PARTUUIDs. The rootfs expands on first boot.
+   - Use **`http://`**, not `https://`: PINN silently drops
+     `alt_image_source` URLs that don't start with `http://`. GitHub
+     redirects to https and PINN follows the redirect.
+   - Only the **last** `alt_image_source` on the line is used.
+   - Either edit `recovery.cmdline` on PINN's partition from another
+     computer, or from a running PINN: Maintenance menu → select the
+     **PINN** entry → **Edit Config** → `cmdline.txt` tab (or **Edit
+     Options** → `alt_image_source`), save, then reboot PINN.
+2. Reboot PINN with the network connected — **Jellyby** appears in the OS
+   list (tab "Media"). It is only listed on a Pi 4, Pi 400 or CM4.
+3. **Empty card / reinstall everything:** tick it with any other OSes and
+   press Install. ⚠️ Install erases every OS already on the card.
+4. **Add it to a card that already has OSes** — replace a Project Space or
+   an OS you no longer want:
+   1. On the Main Menu, tick **Jellyby** (do *not* press Install).
+   2. Switch to the Maintenance toolbar (`more` button, or `M`), select the
+      Project Space / OS to replace, and press **Replace**.
+   3. In the dialog, choose **Jellyby** in the drop-down next to it, then OK.
+
+   The target must have two partitions (FAT boot + ext4 root) and be big
+   enough: about 70 MB of boot data and ~3.2 GB of root data. A default
+   Project Space (100 MB FAT + 500 MB ext4) only fits if its ext4 grew into
+   the free space on the card. Other OSes are left untouched.
+5. PINN writes the partitions and runs `partition_setup.sh`, which rewrites
+   `cmdline.txt`/`fstab` to the new partitions. The rootfs expands on first
+   boot.
+
+**Offline install (no network in PINN):** download `os.json`,
+`partitions.json`, `partition_setup.sh`, `boot.tar.xz`, `root.tar.xz`,
+`Jellyby.png` and `marketing.tar` from the release into `os/Jellyby/` at the
+root of either **PINN's own FAT partition** or the **first partition of a USB
+stick**. PINN looks for one tarball per partition named after its label, so
+the root tarball must be called `root.tar.xz` (releases up to v0.6.2 ship it
+as `rootfs.tar.xz` — rename it).
 
 ### Option D — Radxa ZERO 3E/3W (experimental, untested on hardware)
 
